@@ -1,9 +1,12 @@
 package za.co.fnb.dcre.prg.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import za.co.fnb.dcre.platform.files.StagedWrite;
 import za.co.fnb.dcre.prg.data.model.StatusRow;
+import za.co.fnb.dcre.prg.data.model.UnknownRow;
 import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
 
 import java.io.IOException;
@@ -23,6 +26,8 @@ import java.util.Optional;
 @Service
 public class PsrReportService {
 
+    private static final Logger log = LoggerFactory.getLogger(PsrReportService.class);
+
     private final PrgWatermarkRepo watermarks;
     private final String exchangeRoot;
 
@@ -34,6 +39,11 @@ public class PsrReportService {
 
     /** @return the emitted PSR file path, or empty when the window carries no delta. */
     public Optional<Path> window(String client, String windowKey, boolean resend) throws IOException {
+        // R-38 exclusion visibility: mid-DAG rows (status NULL) never reach a PSR.
+        for (UnknownRow unknown : watermarks.findUnknown(client)) {
+            log.warn("excluded stage=PRG arrival={} seq={} e2e={} reason=STATUS_UNKNOWN",
+                    unknown.arrivalId(), unknown.sequence(), unknown.e2e());
+        }
         List<StatusRow> rows = resend ? watermarks.findRange(client) : watermarks.findDelta(client);
         if (rows.isEmpty()) {
             return Optional.empty();

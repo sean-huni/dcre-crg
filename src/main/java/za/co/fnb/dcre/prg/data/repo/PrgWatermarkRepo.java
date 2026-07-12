@@ -6,6 +6,7 @@ import org.springframework.data.repository.CrudRepository;
 import org.springframework.data.repository.query.Param;
 import za.co.fnb.dcre.prg.data.model.PrgWatermarkEntity;
 import za.co.fnb.dcre.prg.data.model.StatusRow;
+import za.co.fnb.dcre.prg.data.model.UnknownRow;
 
 import java.util.List;
 import java.util.UUID;
@@ -33,6 +34,13 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
             WHERE x.client = :client AND x.status IS NOT NULL
             ORDER BY x.e2e""", rowMapperClass = StatusRowMapper.class)
     List<StatusRow> findRange(@Param("client") String client);
+
+    /** Mid-DAG rows with no reportable status yet: excluded from PSR (R-38 visibility). */
+    @Query(value = """
+            SELECT x.arrival_id, x.sequence, x.e2e
+            FROM ext_tx_status x
+            WHERE x.client = :client AND x.status IS NULL""", rowMapperClass = UnknownRowMapper.class)
+    List<UnknownRow> findUnknown(@Param("client") String client);
 
     /** NEVER UPSERT INTO: CRDB resolves UPSERT on PK only; business identity is (client, e2e). */
     @Modifying

@@ -1,6 +1,12 @@
 package za.co.fnb.dcre.prg;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+import za.co.fnb.dcre.prg.service.PsrReportService;
 import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.job.JobExecution;
@@ -99,9 +105,25 @@ class PrgJobTest {
         seed(arrival, client);
         Path dir = Path.of("build/test-exchange/onhost-resp");
 
+        Logger psrLogger = (Logger) LoggerFactory.getLogger(PsrReportService.class);
+        ListAppender<ILoggingEvent> warns = new ListAppender<>();
+        warns.start();
+        psrLogger.addAppender(warns);
+
         // (a) w1: full first delta, 4 rows with the deepest-leg status each (R-17).
         JobExecution w1 = jobOperator.start(prgJob, window(client, "w1", false));
         assertEquals(BatchStatus.COMPLETED, w1.getStatus());
+
+        // R-38 exclusion visibility: tx5 has no verdict (status NULL) -> exactly one WARN in w1.
+        List<String> exclusionWarns = warns.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.contains("excluded stage=PRG"))
+                .toList();
+        assertEquals(1, exclusionWarns.size(), "exactly one excluded tx in w1 (R-38)");
+        assertEquals("excluded stage=PRG arrival=" + arrival + " seq=5 e2e=E2EPRG5"
+                + " reason=STATUS_UNKNOWN", exclusionWarns.get(0), "uniform R-38 WARN shape");
+        psrLogger.detachAppender(warns);
         Path file1 = dir.resolve(client + "_PSR_w1.txt");
         List<String> lines = Files.readAllLines(file1);
         assertEquals("PSR|" + client + "|w1", lines.get(0));
