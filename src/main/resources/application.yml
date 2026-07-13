@@ -1,5 +1,8 @@
 # 12FactorApp: committed working dev defaults; env overrides. (yml-only rule, configuration.md p19)
 spring:
+  threads:
+    virtual:
+      enabled: true
   datasource:
     url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_collections?sslmode=disable}
     username: ${DCRE_DB_USER:root}
