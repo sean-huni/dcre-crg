@@ -2,8 +2,10 @@ package za.co.fnb.dcre.prg.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import za.co.fnb.dcre.platform.files.ExchangeChannel;
+import za.co.fnb.dcre.platform.files.ExchangeLayout;
+import za.co.fnb.dcre.platform.files.ExchangeSub;
 import za.co.fnb.dcre.platform.files.StagedWrite;
 import za.co.fnb.dcre.prg.data.model.StatusRow;
 import za.co.fnb.dcre.prg.data.model.UnknownRow;
@@ -29,12 +31,11 @@ public class PsrReportService {
     private static final Logger log = LoggerFactory.getLogger(PsrReportService.class);
 
     private final PrgWatermarkRepo watermarks;
-    private final String exchangeRoot;
+    private final ExchangeLayout layout;
 
-    public PsrReportService(PrgWatermarkRepo watermarks,
-                            @Value("${dcre.exchange-root}") String exchangeRoot) {
+    public PsrReportService(final PrgWatermarkRepo watermarks, final ExchangeLayout layout) {
         this.watermarks = watermarks;
-        this.exchangeRoot = exchangeRoot;
+        this.layout = layout;
     }
 
     /** @return the emitted PSR file path, or empty when the window carries no delta. */
@@ -48,7 +49,8 @@ public class PsrReportService {
         if (rows.isEmpty()) {
             return Optional.empty();
         }
-        Path target = Path.of(exchangeRoot, "onhost-resp", client + "_PSR_" + windowKey + ".txt");
+        Path target = layout.resolve(client, ExchangeChannel.ONHOST_RESP, ExchangeSub.OUT)
+                .resolve(client + "_PSR_" + windowKey + ".txt");
         StagedWrite.write(target, render(client, windowKey, rows));
         for (StatusRow row : rows) {
             watermarks.upsertWatermark(client, row.e2e(), row.status());

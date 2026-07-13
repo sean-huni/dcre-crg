@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.job.Job;
@@ -32,6 +33,12 @@ import za.co.fnb.dcre.prg.service.PsrReportService;
 
 /** Glue for the PSR window projection feature; scenario-scoped (fresh instance per scenario). */
 public class PrgSteps {
+
+    // SCRUM-42: each scenario draws a distinct configured client from the isolation pool
+    // (FNBT00..FNBT15 in the test dcre-exchange-layout.yml). A unique client per scenario
+    // keeps the client-partitioned view, the e2e response joins, and the (client, window)
+    // batch job identity from colliding across scenarios sharing one container.
+    private static final AtomicInteger POOL_SEQ = new AtomicInteger();
 
     @Autowired
     Job prgJob;
@@ -65,13 +72,13 @@ public class PrgSteps {
 
     @Given("a PRG client with a new arrival")
     public void aPrgClientWithANewArrival() {
-        client = "B" + UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+        client = "FNBT%02d".formatted(POOL_SEQ.getAndIncrement());
         arrival = UUID.randomUUID();
         msgId = "MSG" + client;
         jdbc.update("INSERT INTO tx_header (arrival_id, msg_id_raw, msg_id, created_ts, tx_count,"
                 + " initg_pty, business_date, client_token, layout_version)"
                 + " VALUES (?,?,?,?,?,?,?,?,?)",
-                arrival, msgId, msgId, "20260712080000", 9, "FNBRF01", "20260712", client, 2);
+                arrival, msgId, msgId, "20260712080000", 9, client, "20260712", client, 2);
     }
 
     @Given("transaction {string} has SBSR status {string} and PBSR status {string}")
@@ -198,6 +205,8 @@ public class PrgSteps {
     }
 
     private Path psrFile(String window) {
-        return Path.of("build/test-exchange", "onhost-resp", client + "_PSR_" + window + ".txt");
+        // SCRUM-42 per-client leaf: <root>/<base>/onhost-resp/out/<client>_PSR_<window>.txt.
+        return Path.of("build/test-exchange", client.toLowerCase(), "onhost-resp", "out",
+                client + "_PSR_" + window + ".txt");
     }
 }
