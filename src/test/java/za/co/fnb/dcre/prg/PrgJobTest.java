@@ -30,7 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange"})
+@SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
+        "DCRE_EXCHANGE_ROOT=build/test-exchange"})
 class PrgJobTest {
 
     static final CockroachContainer CRDB =
@@ -101,9 +102,10 @@ class PrgJobTest {
     @Test
     void emitsDeltaPsrPerClockWindow() throws Exception {
         UUID arrival = UUID.randomUUID();
-        String client = "C" + arrival.toString().substring(0, 6);
+        // SCRUM-42: a real configured client token; PSR now lands under the per-client /out leaf.
+        String client = "FNBRF01";
         seed(arrival, client);
-        Path dir = Path.of("build/test-exchange/onhost-resp");
+        Path dir = Path.of("build/test-exchange/fnbrf01/onhost-resp/out");
 
         Logger psrLogger = (Logger) LoggerFactory.getLogger(PsrReportService.class);
         ListAppender<ILoggingEvent> warns = new ListAppender<>();
@@ -151,5 +153,33 @@ class PrgJobTest {
         assertEquals(List.of("TX|E2EPRG1|RJCT", "TX|E2EPRG2|ACSC", "TX|E2EPRG3|RJCT",
                 "TX|E2EPRG4|CTV_PASS"), txLines(dir.resolve(client + "_PSR_w4.txt")));
         assertTrue(Files.readAllLines(dir.resolve(client + "_PSR_w4.txt")).contains("END|4"));
+    }
+
+    /**
+     * SCRUM-42 fail-closed: an unconfigured client with a reportable row makes the layout
+     * throw rather than emit to a shared/wrong directory, so the batch job fails closed.
+     */
+    @Test
+    void failsClosedWhenClientHasNoConfiguredExchangeDir() throws Exception {
+        UUID arrival = UUID.randomUUID();
+        String client = "FNBZZ99"; // absent from dcre-exchange-layout.yml
+        jdbc.update("INSERT INTO tx_header (arrival_id, msg_id_raw, msg_id, created_ts, tx_count,"
+                + " initg_pty, business_date, client_token, layout_version)"
+                + " VALUES (?,?,?,?,?,?,?,?,?)",
+                arrival, "DCREZZPRG01", "DCREZZPRG01", "20260712080000", 1, client, "20260712", client, 2);
+        jdbc.update("INSERT INTO tx_entry (arrival_id, sequence, record_type, e2e_raw, e2e,"
+                + " creditor_account, currency, amount_raw, amount) VALUES (?,?,?,?,?,?,?,?,?)",
+                arrival, 1, "DC", "E2EZZ1", "E2EZZ1", "62000000010", "ZAR", "1000", 10.00);
+        jdbc.update("INSERT INTO validation_log (arrival_id, sequence, outcome) VALUES (?,?,'PASS')",
+                arrival, 1);
+
+        JobExecution failed = jobOperator.start(prgJob, window(client, "w1", false));
+
+        assertEquals(BatchStatus.FAILED, failed.getStatus(), "unconfigured client must fail closed");
+        assertTrue(failed.getAllFailureExceptions().stream()
+                        .anyMatch(t -> t instanceof IllegalArgumentException && t.getMessage().contains(client)),
+                "failure is the fail-closed IllegalArgumentException naming the unconfigured client");
+        assertFalse(Files.exists(Path.of("build/test-exchange/fnbzz99/onhost-resp/out/" + client + "_PSR_w1.txt")),
+                "no PSR file is written for an unconfigured client");
     }
 }
