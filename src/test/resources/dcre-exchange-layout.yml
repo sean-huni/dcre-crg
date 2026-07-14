@@ -7,6 +7,9 @@
 # identity is (client, window) -- a shared client would collide on all three).
 dcre:
   exchange:
+    # Activation marker for ExchangeAutoConfiguration, mirroring the shipped resource this
+    # file shadows: since the 2026-07-14 fleet fix the autoconfig backs off without it.
+    enabled: true
     root: ${DCRE_EXCHANGE_ROOT:build/test-exchange}
     clients:
       "[FNBCC01]":

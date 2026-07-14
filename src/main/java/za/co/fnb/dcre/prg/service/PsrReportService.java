@@ -3,6 +3,9 @@ package za.co.fnb.dcre.prg.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import za.co.fnb.dcre.platform.files.ExchangeChannel;
 import za.co.fnb.dcre.platform.files.ExchangeLayout;
 import za.co.fnb.dcre.platform.files.ExchangeSub;
@@ -32,10 +35,17 @@ public class PsrReportService {
 
     private final PrgWatermarkRepo watermarks;
     private final ExchangeLayout layout;
+    private final TransactionTemplate watermarkTx;
 
-    public PsrReportService(final PrgWatermarkRepo watermarks, final ExchangeLayout layout) {
+    public PsrReportService(final PrgWatermarkRepo watermarks, final ExchangeLayout layout,
+                            final PlatformTransactionManager txManager) {
         this.watermarks = watermarks;
         this.layout = layout;
+        // Each watermark-advance attempt needs its OWN transaction: a CRDB
+        // 40001 abort poisons the surrounding transaction (25P02 on any further
+        // statement), so retrying inside the step transaction can never succeed.
+        this.watermarkTx = new TransactionTemplate(txManager);
+        this.watermarkTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /** @return the emitted PSR file path, or empty when the window carries no delta. */
@@ -52,10 +62,19 @@ public class PsrReportService {
         Path target = layout.resolve(client, ExchangeChannel.ONHOST_RESP, ExchangeSub.OUT)
                 .resolve(client + "_PSR_" + windowKey + ".txt");
         StagedWrite.write(target, render(client, windowKey, rows));
-        for (StatusRow row : rows) {
-            watermarks.upsertWatermark(client, row.e2e(), row.status());
-        }
+        // R-29: file exists by now, so replaying the advance is safe (upsert
+        // keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
+        advanceWatermarks(client, rows);
         return Optional.of(target);
+    }
+
+    private void advanceWatermarks(final String client, final List<StatusRow> rows) {
+        CrdbRetry.run("watermark-advance client=" + client, () ->
+                watermarkTx.executeWithoutResult(status -> {
+                    for (StatusRow row : rows) {
+                        watermarks.upsertWatermark(client, row.e2e(), row.status());
+                    }
+                }));
     }
 
     private List<String> render(String client, String windowKey, List<StatusRow> rows) {
