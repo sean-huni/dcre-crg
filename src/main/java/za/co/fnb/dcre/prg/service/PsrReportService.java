@@ -2,6 +2,7 @@ package za.co.fnb.dcre.prg.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -9,14 +10,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 import za.co.fnb.dcre.platform.files.ExchangeChannel;
 import za.co.fnb.dcre.platform.files.ExchangeLayout;
 import za.co.fnb.dcre.platform.files.ExchangeSub;
-import za.co.fnb.dcre.platform.files.StagedWrite;
 import za.co.fnb.dcre.prg.data.model.StatusRow;
 import za.co.fnb.dcre.prg.data.model.UnknownRow;
 import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -24,21 +24,37 @@ import java.util.Optional;
  * Business tier: per-client delta PSR emission on clock windows.
  * PSR flat file layout is a SYNTHETIC-CONTRACT (R-35): header
  * "PSR|client|window", one "TX|e2e|status" per row, trailer "END|count".
- * Zero delta rows = NO file for the window; resend re-emits ALL current
- * rows. R-29 order: file first (StagedWrite), watermark advance second,
- * so a crash between the two replays as a StagedWrite no-op + advance.
+ * Zero delta rows = NO file for the window; resend re-emits ALL current rows.
+ *
+ * <p>SCRUM-42 load fix: whole-book reads plus a full in-heap render blew
+ * CRDB's sql memory budget (2116569420 bytes on the 30M-tx book) and the JVM.
+ * Every read is now a bounded keyset slice (ORDER BY e2e LIMIT sliceSize) and
+ * the PSR streams to disk slice by slice; nothing holds more than one slice
+ * of rows in heap at once.
+ *
+ * <p>R-29 order preserved: the WHOLE file becomes visible first (streamed tmp
+ * + ATOMIC_MOVE), then watermarks advance in per-slice REQUIRES_NEW
+ * transactions. A crash between the two replays as skip-existing-file +
+ * watermark advance from a fresh delta read: the existing restart semantics,
+ * which the advance phase now uses on EVERY run (it re-reads the same keyset
+ * slices rather than holding the streamed rows).
  */
 @Service
 public class PsrReportService {
+
+    /** Above this, unknown-status exclusions collapse to ONE summary WARN (R-38 at scale, CRW's hybrid). */
+    static final int UNKNOWN_DETAIL_WARN_LIMIT = 100;
 
     private static final Logger log = LoggerFactory.getLogger(PsrReportService.class);
 
     private final PrgWatermarkRepo watermarks;
     private final ExchangeLayout layout;
     private final TransactionTemplate watermarkTx;
+    private final int sliceSize;
 
     public PsrReportService(final PrgWatermarkRepo watermarks, final ExchangeLayout layout,
-                            final PlatformTransactionManager txManager) {
+                            final PlatformTransactionManager txManager,
+                            @Value("${dcre.prg.psr-slice-size:50000}") final int sliceSize) {
         this.watermarks = watermarks;
         this.layout = layout;
         // Each watermark-advance attempt needs its OWN transaction: a CRDB
@@ -46,44 +62,101 @@ public class PsrReportService {
         // statement), so retrying inside the step transaction can never succeed.
         this.watermarkTx = new TransactionTemplate(txManager);
         this.watermarkTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.sliceSize = sliceSize;
     }
 
     /** @return the emitted PSR file path, or empty when the window carries no delta. */
-    public Optional<Path> window(String client, String windowKey, boolean resend) throws IOException {
-        // R-38 exclusion visibility: mid-DAG rows (status NULL) never reach a PSR.
-        for (UnknownRow unknown : watermarks.findUnknown(client)) {
-            log.warn("excluded stage=PRG arrival={} seq={} e2e={} reason=STATUS_UNKNOWN",
-                    unknown.arrivalId(), unknown.sequence(), unknown.e2e());
-        }
-        List<StatusRow> rows = resend ? watermarks.findRange(client) : watermarks.findDelta(client);
-        if (rows.isEmpty()) {
+    public Optional<Path> window(final String client, final String windowKey, final boolean resend)
+            throws IOException {
+        warnUnknown(client);
+        final List<StatusRow> first = readSlice(client, resend, "");
+        if (first.isEmpty()) {
             return Optional.empty();
         }
-        Path target = layout.resolve(client, ExchangeChannel.ONHOST_RESP, ExchangeSub.OUT)
+        final Path target = layout.resolve(client, ExchangeChannel.ONHOST_RESP, ExchangeSub.OUT)
                 .resolve(client + "_PSR_" + windowKey + ".txt");
-        StagedWrite.write(target, render(client, windowKey, rows));
-        // R-29: file exists by now, so replaying the advance is safe (upsert
-        // keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
-        advanceWatermarks(client, rows);
+        if (!Files.exists(target)) {
+            // R-24 restart no-op contract: an existing target means a prior
+            // emission stands; only a fresh window streams a new file.
+            streamPsr(client, windowKey, resend, target, first);
+        }
+        // R-29: the whole file is visible by now, so replaying the advance is safe
+        // (upsert keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
+        advanceWatermarks(client, resend);
         return Optional.of(target);
     }
 
-    private void advanceWatermarks(final String client, final List<StatusRow> rows) {
-        CrdbRetry.run("watermark-advance client=" + client, () ->
-                watermarkTx.executeWithoutResult(status -> {
-                    for (StatusRow row : rows) {
+    /**
+     * R-38 exclusion visibility without the row-returning whole-book scan
+     * that blew the sql memory budget: aggregate count per client, per-row
+     * WARN detail only at small counts (mirrors CRW's hybrid choice).
+     */
+    private void warnUnknown(final String client) {
+        final long unknown = watermarks.countUnknown(client);
+        if (unknown == 0) {
+            return;
+        }
+        if (unknown <= UNKNOWN_DETAIL_WARN_LIMIT) {
+            for (final UnknownRow row : watermarks.findUnknownDetail(client, UNKNOWN_DETAIL_WARN_LIMIT)) {
+                log.warn("excluded stage=PRG arrival={} seq={} e2e={} reason=STATUS_UNKNOWN",
+                        row.arrivalId(), row.sequence(), row.e2e());
+            }
+            return;
+        }
+        log.warn("excluded stage=PRG client={} count={} reason=STATUS_UNKNOWN", client, unknown);
+    }
+
+    /** Streams header, every slice's TX lines and the counted trailer, then moves tmp to target atomically. */
+    private void streamPsr(final String client, final String windowKey, final boolean resend,
+                           final Path target, final List<StatusRow> first) throws IOException {
+        try (StreamedPsrWrite psr = StreamedPsrWrite.begin(target, "PSR|" + client + "|" + windowKey)) {
+            List<StatusRow> slice = first;
+            while (true) {
+                for (final StatusRow row : slice) {
+                    psr.writeTx("TX|" + row.e2e() + "|" + row.status());
+                }
+                if (slice.size() < sliceSize) {
+                    break;
+                }
+                slice = readSlice(client, resend, slice.getLast().e2e());
+            }
+            psr.commit();
+        }
+    }
+
+    /**
+     * R-29 second phase: re-reads the same keyset slices and upserts each in
+     * a bounded REQUIRES_NEW transaction (fresh tx per CrdbRetry attempt).
+     * Advanced delta rows drop out of later slices; the keyset resume keeps
+     * both delta and resend reads bounded and forward-only.
+     */
+    private void advanceWatermarks(final String client, final boolean resend) {
+        String after = "";
+        while (true) {
+            final List<StatusRow> slice = readSlice(client, resend, after);
+            if (slice.isEmpty()) {
+                return;
+            }
+            advanceSlice(client, slice);
+            if (slice.size() < sliceSize) {
+                return;
+            }
+            after = slice.getLast().e2e();
+        }
+    }
+
+    private void advanceSlice(final String client, final List<StatusRow> slice) {
+        CrdbRetry.run("watermark-advance client=%s from=%s".formatted(client, slice.getFirst().e2e()),
+                () -> watermarkTx.executeWithoutResult(status -> {
+                    for (final StatusRow row : slice) {
                         watermarks.upsertWatermark(client, row.e2e(), row.status());
                     }
                 }));
     }
 
-    private List<String> render(String client, String windowKey, List<StatusRow> rows) {
-        List<String> lines = new ArrayList<>();
-        lines.add("PSR|" + client + "|" + windowKey);
-        for (StatusRow row : rows) {
-            lines.add("TX|" + row.e2e() + "|" + row.status());
-        }
-        lines.add("END|" + rows.size());
-        return lines;
+    private List<StatusRow> readSlice(final String client, final boolean resend, final String afterE2e) {
+        return resend
+                ? watermarks.findRangeSlice(client, afterE2e, sliceSize)
+                : watermarks.findDeltaSlice(client, afterE2e, sliceSize);
     }
 }

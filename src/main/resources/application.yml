@@ -26,3 +26,8 @@ dcre:
   amount-scale: ${DCRE_AMOUNT_SCALE:2}
   v1-enabled: ${DCRE_V1_ENABLED:false}
   flow-dc: ${DCRE_FLOW_DC:true}
+  prg:
+    # SCRUM-42: whole-book reads + a full in-heap render blew CRDB's sql memory
+    # budget on the 30M-tx book; PSR reads, streaming emission and watermark
+    # advances all run in bounded keyset slices of this size.
+    psr-slice-size: ${DCRE_PRG_PSR_SLICE_SIZE:50000}

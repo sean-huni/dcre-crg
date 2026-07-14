@@ -36,6 +36,9 @@ class PsrReportServiceRetryTest {
 
     private static final String CLIENT = "FNBRF01";
 
+    /** Larger than the stubbed delta so both phases finish on the first slice. */
+    private static final int SLICE_SIZE = 10;
+
     private static final CannotAcquireLockException ABORT = new CannotAcquireLockException(
             "PreparedStatementCallback; ERROR: restart transaction: TransactionRetryWithProtoRefreshError:"
                     + " WriteTooOldError");
@@ -51,9 +54,11 @@ class PsrReportServiceRetryTest {
         watermarks = mock(PrgWatermarkRepo.class);
         ExchangeLayout layout = new ExchangeLayout(root, Map.of(CLIENT,
                 Map.of(ExchangeChannel.ONHOST_RESP, Map.of(ExchangeSub.OUT, "fnbrf01/onhost-resp/out"))));
-        service = new PsrReportService(watermarks, layout, new ResourcelessTransactionManager());
-        when(watermarks.findUnknown(CLIENT)).thenReturn(List.of());
-        when(watermarks.findDelta(CLIENT)).thenReturn(List.of(
+        service = new PsrReportService(watermarks, layout, new ResourcelessTransactionManager(), SLICE_SIZE);
+        when(watermarks.countUnknown(CLIENT)).thenReturn(0L);
+        // SCRUM-42 sliced reads: the stream phase AND the R-29 advance phase each
+        // read the first (and only) keyset slice.
+        when(watermarks.findDeltaSlice(CLIENT, "", SLICE_SIZE)).thenReturn(List.of(
                 new StatusRow("E2E1", "ACSC"), new StatusRow("E2E2", "RJCT")));
     }
 
