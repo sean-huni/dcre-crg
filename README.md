@@ -1,71 +1,113 @@
 # dcre-prg
 
-Payment Report Generator (SCRUM-28, M4). Projects per-transaction external status (ext_tx_status view over spine + validation + ISR/SBSR/PBSR response legs, R-17 stage ranking) and emits delta PSR report files per client on clock windows. Watermark keyed (client, e2e): a window with no status changes emits NO file; resend=true re-emits all current rows. R-29 order: file first (StagedWrite), watermark advance second. 3-tier: PsrTasklet -> PsrReportService -> data/repo. PSR flat file format is SYNTHETIC-CONTRACT (R-35). Spring Boot 4.1.0 / Spring Batch / Java 25.
+PSR Generator: clock-windowed status reporter, the terminal stage of the DCRE response leg.
 
-## Pipeline position
+## What it does
 
-Terminal stage of the shared response leg: `IXR | SXR | PXR -> ext_tx_status -> PRG`, serving DC and ENDO alike. Not file-triggered: AGT's clock instantiates `prgJob` per (client, window) from the per-client report schedule (R-28), plus on-demand runs with the same launch contract; PRG never waits on the response readers, it reports whatever `ext_tx_status` holds behind the watermark. Output: PSR FlatFile to the OnHost response directory (R-30 boundary writer). PRG is canonical naming; never write CRG (R-13).
+PRG projects per-transaction external status (the `ext_tx_status` view over spine + validation + ISR/SBSR/PBSR response legs, deepest leg wins per R-17) and emits delta Payment Status Report (PSR) files per client on clock windows. Each run diffs `ext_tx_status` against the `prg_watermark` table for one client, streams the delta as a PSR flat file into the client's `onhost-resp/out` exchange directory, then advances the watermark in bounded slices. It is not file-triggered: AGT's clock instantiates `prgJob` per (client, window) as a short-lived Kubernetes Job, and PRG reports whatever `ext_tx_status` holds behind the watermark, serving the DC and ENDO flows alike.
 
-## Job structure
+## Architecture and principles
 
-One job `prgJob`, one tasklet step `psrStep`; 3-tier `PsrTasklet -> PsrReportService -> PrgWatermarkRepo` (+ row mappers).
+- **SOLID, 3-tier**: one responsibility per class along `PsrTasklet` (thin Spring Batch entry adapter) -> `PsrReportService` (business tier) -> `PrgWatermarkRepo` (Spring Data JDBC). Supporting single-purpose units: `StreamedPsrWrite` (staged streaming boundary write), `CrdbRetry` (bounded SQLSTATE 40001 retry), `SeamListener` (outcome seam). Layer-first packages: `config/`, `service/`, `data/model/`, `data/repo/`.
+- **12FactorApp Alignment - https://12factor.net/**: config strictly from the environment with committed working dev defaults (a clean clone runs with no `.env`), stateless one-shot process (the JVM exit code carries the Batch verdict via `ExitCodeMain`, R-34), CockroachDB and the exchange directory as attached resources.
+- **Idempotent restart semantics**: job identity is the identifying parameter pair (client, window) (R-16); `resend` is non-identifying. R-29 order: the WHOLE file becomes visible first (streamed tmp + `ATOMIC_MOVE`), then watermarks advance in per-slice `REQUIRES_NEW` transactions. An existing target file is a restart no-op (R-24); a crash between file and watermark replays as skip-existing-file + watermark advance, neither skipping nor duplicating. `StaleExecutionSweeper.abandonStale(ds, "PRG_BATCH_", 60)` runs as an `@Order(-10)` `ApplicationRunner` so a killed pod never strands a STARTED execution (A-39a).
+- **CRDB-correct upserts**: watermark writes are `INSERT ... ON CONFLICT (client, e2e) DO UPDATE`, never `UPSERT INTO` (CRDB arbitrates UPSERT on the primary key only; the business identity is (client, e2e)). Serialization aborts (40001) retry up to 5 attempts with jittered backoff in a fresh transaction per attempt.
+- **Bounded scale (SCRUM-42)**: whole-book reads plus a full in-heap render blew CRDB's sql memory budget on the 30M-tx book. Every read is now a keyset slice (`ORDER BY e2e LIMIT :limit`, default 50000) and the PSR streams to disk slice by slice; nothing holds more than one slice in heap.
 
-- Job parameters: `client` and `window` (both identifying: job identity is (client, window), R-16); `resend` (non-identifying, `"true"` to override the watermark).
-- Scheduled run: delta selection, rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet), `status IS NOT NULL` only. Zero delta rows = no file (the ExecutionContext records `psr.file=NONE`).
-- Resend run: ALL current known-status rows for the client, watermark ignored; re-projects CURRENT state, not the original report (A-8 ruling).
-- R-38 exclusion visibility: mid-DAG rows with `status IS NULL` are never reportable; each is WARN-logged in the uniform shape `excluded stage=PRG arrival=<uuid> seq=<n> e2e=<e2e> reason=STATUS_UNKNOWN` and leaves the watermark untouched.
-- File: `<exchange-root>/onhost-resp/<client>_PSR_<window>.txt`; layout SYNTHETIC-CONTRACT (R-35): header `PSR|client|window`, one `TX|e2e|status` per row ordered by e2e, trailer `END|count`.
-- R-29 order: `StagedWrite` (tmp + ATOMIC_MOVE) first, then per-row watermark upsert `ON CONFLICT (client, e2e) DO UPDATE`. A crash between the two replays as a StagedWrite no-op plus watermark advance: neither skips nor duplicates (R-05). Never CRDB `UPSERT INTO`: it resolves on PK only, business identity is (client, e2e).
+### Job contract
+
+One job `prgJob`, one tasklet step `psrStep`.
+
+- Scheduled run: delta selection, rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet), `status IS NOT NULL` only. Zero delta rows = NO file (the ExecutionContext records `psr.file=NONE`).
+- Resend run (`resend=true`, non-identifying): ALL current known-status rows, watermark ignored; re-projects CURRENT state, not the original report (A-8).
+- R-38 exclusion visibility: mid-DAG rows with `status IS NULL` are never reportable. Up to 100 each gets a WARN in the uniform shape `excluded stage=PRG arrival=<uuid> seq=<n> e2e=<e2e> reason=STATUS_UNKNOWN`; above 100 they collapse to one summary WARN per client.
+- File: `<exchange-root>/<client-base>/onhost-resp/out/<CLIENT>_PSR_<window>.txt`; layout is SYNTHETIC-CONTRACT (R-35): header `PSR|client|window`, one `TX|e2e|status` per row ordered by e2e, trailer `END|count`. An unconfigured client fails the job closed (`IllegalArgumentException` from the layout) rather than writing to a wrong directory.
 - Outcome seam: on COMPLETED, `BUSINESS_ACCEPTED` to `<exchange-root>/outcomes/<JOB_NAME>` (`OutcomeFileWriter`, R-33).
 
-## Database and batch metadata
+### Database and batch metadata
 
-Liquibase (per-service history tables `prg_databasechangelog` / `prg_databasechangeloglock` on the shared `dcre_collections` DB):
+Liquibase with per-service history tables (`prg_databasechangelog` / `prg_databasechangeloglock`) on the shared `dcre_collections` DB:
 
-1. `001-prg.xml`, changeSet 001: BOOTSTRAP-ORDER GUARD. PRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers ever executed, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
-2. ChangeSet 002: `ext_tx_status` view. Deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
+1. `2026/07/001-prg.xml` changeSet 001: BOOTSTRAP-ORDER GUARD. PRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
+2. ChangeSet 002: `ext_tx_status` view, deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
 3. ChangeSet 003: `prg_watermark` (PRG single writer, R-04), `UNIQUE (client, e2e)`, `last_status NOT NULL`.
-4. `002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`initialize-schema: never`). `StaleExecutionSweeper.abandonStale(ds, "PRG_BATCH_", 60)` runs as an `@Order(-10)` `ApplicationRunner` before launch (A-39a).
+4. `2026/07/002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
 
-## Local module dependencies
+### Platform library dependencies (mavenLocal, 0.1.0)
 
-| Module | Version | Scope | Used for |
-|---|---|---|---|
-| `dcre-platform-persistence` | 0.1.0 | `implementation` | `BaseEntity` (version/created_at/updated_at on `PrgWatermarkEntity`), `JdbcConfig` (Spring Data JDBC base config, imported by `PrgApplication`) |
-| `dcre-platform-files` | 0.1.0 | `implementation` | `StagedWrite` (R-29 file-first atomic PSR write: tmp + ATOMIC_MOVE, restart no-op) |
-| `dcre-platform-batch` | 0.1.0 | `implementation` | `ExitCodeMain` (R-34 exit-code wiring), `OutcomeFileWriter` (outcome seam), `StaleExecutionSweeper` (A-39a self-abandonment) |
+| Module | Used for |
+|---|---|
+| `za.co.fnb.dcre:platform-persistence` | `BaseEntity` (on `PrgWatermarkEntity`), `JdbcConfig` (imported by `PrgApplication`) |
+| `za.co.fnb.dcre:platform-files` | `ExchangeLayout` / `ExchangeChannel` / `ExchangeSub` (per-client exchange resolution, fail-closed) |
+| `za.co.fnb.dcre:platform-batch` | `ExitCodeMain`, `OutcomeFileWriter`, `StaleExecutionSweeper`; ships the `dcre-exchange-layout.yml` classpath resource imported via `spring.config.import` |
 
-All three resolve from Maven Local only (no remote repository): run `./gradlew publishToMavenLocal` in each dependency repo first, publish chain `dcre-platform-model` -> `dcre-platform-files` -> `dcre-platform-batch` (each `api`-exposes the previous, so batch brings files brings model); `dcre-platform-persistence` is standalone. Details in each module repo's README under "Publishing".
+## Prerequisites
 
-## Configuration
+- Java 25 (Gradle toolchain; Gradle 9.5.1 wrapper included)
+- Docker (Testcontainers CockroachDB in tests, image build)
+- Platform libs published to Maven Local: run `./gradlew publishToMavenLocal` in `dcre-platform-model` -> `dcre-platform-files` -> `dcre-platform-batch` (each `api`-exposes the previous) and in `dcre-platform-persistence` (standalone)
+- A reachable CockroachDB and exchange directory for a real run (the `dcre-infra` kind cluster locally)
 
-12FactorApp: committed working dev defaults, env overrides, clean clone runs with no `.env`.
+## Quickstart
 
-| Env | Default | Use |
-|---|---|---|
-| `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_collections?sslmode=disable` | CockroachDB via pgwire |
-| `DCRE_DB_USER` / `DCRE_DB_PASSWORD` | `root` / empty | DB credentials |
-| `DCRE_EXCHANGE_ROOT` | `../../infra/dcre-infra/exchange` | PSR output dir + outcome seam |
-| `DCRE_AMOUNT_SCALE` | `2` | Fleet-wide flag; not read by PRG sources |
-| `DCRE_V1_ENABLED` / `DCRE_FLOW_DC` | `false` / `true` | Fleet-wide flags; not read by PRG sources |
-| `JOB_NAME` | `local-<executionId>` | K8s-injected identity for the outcome seam |
-
-## Build and test
-
-`./gradlew build` (Gradle 9.5.1 wrapper, Java 25 toolchain). Platform libs resolve from mavenLocal (see Local module dependencies). `./gradlew test`: Testcontainers CockroachDB v26.2.3, one end-to-end window sequence: (a) first delta carries the deepest-leg status per row (R-17) and exactly one R-38 exclusion WARN for the mid-DAG row, (b) unchanged window emits no file, (c) a single status flip emits exactly that row, (d) resend re-emits all current rows.
-
-## Run
-
-One-shot batch process; the JVM exit code carries the Batch outcome (`ExitCodeMain`, R-34).
+Clean clone, no `.env` needed (committed dev defaults):
 
 ```bash
 ./gradlew build
-java -jar build/libs/dcre-prg-0.1.0.jar client=<client> window=<windowKey>          # scheduled delta
-java -jar build/libs/dcre-prg-0.1.0.jar client=<client> window=<windowKey> resend=true  # resend override
+
+# one scheduled window against a reachable CockroachDB (defaults: localhost:26257/dcre_collections)
+java -jar build/libs/prg-2.0.jar client=FNBRF01 window=w1
+
+# resend override: non-identifying parameter, re-emits all current rows
+java -jar build/libs/prg-2.0.jar client=FNBRF01 window=w1-manual resend=true,java.lang.String,false
 ```
 
-Container: `docker build -t dcre-prg:dev .` (eclipse-temurin:25-jre-alpine). In the cluster AGT launches the image per (client, window) as an ephemeral K8s Job with `JOB_NAME` set; the JobRepository dedupes on the identifying pair (restart-not-duplicate, R-16). Requires a reachable CockroachDB and the exchange directory (`dcre-infra` compose stack locally).
+## Configuration
 
-## Observability
+Precedence: yml default < environment variable. All defaults are committed in `application.yml`.
 
-No metrics wiring yet (no actuator/Micrometer dependency). The R-38 exclusion WARNs are the contractually shaped log surface; outcome seam files plus `PRG_BATCH_` metadata carry run state.
+| Env | Default | Purpose |
+|---|---|---|
+| `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_collections?sslmode=disable` | CockroachDB via pgwire |
+| `DCRE_DB_USER` | `root` | DB user |
+| `DCRE_DB_PASSWORD` | (empty) | DB password |
+| `DCRE_EXCHANGE_ROOT` | `../../../../../infra/dcre-infra/exchange` | Exchange root: PSR output tree + outcome seam |
+| `DCRE_PRG_PSR_SLICE_SIZE` | `50000` | Keyset slice size for reads, streaming emission and watermark advances |
+| `DCRE_AMOUNT_SCALE` | `2` | Fleet-wide flag; not read by PRG sources |
+| `DCRE_V1_ENABLED` | `false` | Fleet-wide flag; not read by PRG sources |
+| `DCRE_FLOW_DC` | `true` | Fleet-wide flag; not read by PRG sources |
+| `JOB_NAME` | `local-<executionId>` | K8s-injected identity for the outcome seam |
+
+Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpath resource (shipped in `platform-batch`, imported via `spring.config.import`); Batch metadata uses table prefix `PRG_BATCH_`; Liquibase history lives in `prg_databasechangelog`(+lock).
+
+## Testing
+
+```bash
+./gradlew test
+```
+
+Testcontainers CockroachDB `cockroachdb/cockroach:v26.2.3` (Docker required):
+
+- `PrgJobTest`: end-to-end window sequence (first delta with deepest-leg statuses + exactly one R-38 WARN, unchanged window emits no file, single status flip emits exactly that row, resend re-emits all current rows) plus the SCRUM-42 fail-closed unconfigured-client case.
+- `PsrReportServiceSliceTest`: bounded-scan proofs (multi-slice delta -> one correct streamed PSR, restart-with-existing-target still advances watermarks, summary WARN above the detail limit).
+- `PsrReportServiceRetryTest`: 40001 retry semantics of the watermark advance.
+- Cucumber BDD suite: `src/test/resources/features/psr-window-projection.feature` (delta projection, no-movement window, status flip, resend, R-38 exclusion, watermark advance).
+
+## Local cluster deployment
+
+```bash
+./gradlew bootJar
+docker build -t dcre-prg:TAG .
+kind load docker-image --name dcre-dev dcre-prg:TAG
+```
+
+The image base is `eclipse-temurin:25-jre-alpine`. In the cluster, AGT's `PrgScheduler` ticks against its clock (`AGT_PRG_INTERVAL_SECONDS`, default 60), derives the window counter from the epoch and launches the image from `AGT_PRG_IMAGE` as an ephemeral K8s Job per (client, window) with parameters `client=<client> window=w<n>` and `JOB_NAME` injected; the JobRepository dedupes on the identifying pair (restart-not-duplicate, R-16). An on-demand run is triggered by dropping a `chaos/run-prg-<client>` file under the exchange root (launches a distinct `-manual` window with `resend=true`). Fleet version switching: `dcre-infra` `scripts/switch-version.sh`; cluster bring-up: `scripts/kind-up.sh` (kind cluster `dcre-dev`); clean slate: `scripts/env-reset.sh`.
+
+Releases are digits-only 3-component SemVer git tags, uniform across the fleet (current: 2.1.1).
+
+## Related repositories
+
+- Orchestrator: [dcre-agt](https://github.com/sean-huni/dcre-agt)
+- Stage services: [dcre-crr](https://github.com/sean-huni/dcre-crr), [dcre-ctv](https://github.com/sean-huni/dcre-ctv), [dcre-cde](https://github.com/sean-huni/dcre-cde), [dcre-cir](https://github.com/sean-huni/dcre-cir), [dcre-crw](https://github.com/sean-huni/dcre-crw), [dcre-ixr](https://github.com/sean-huni/dcre-ixr), [dcre-sxr](https://github.com/sean-huni/dcre-sxr), [dcre-pxr](https://github.com/sean-huni/dcre-pxr), [dcre-ais](https://github.com/sean-huni/dcre-ais), [dcre-hcs](https://github.com/sean-huni/dcre-hcs)
+- Platform libs: [dcre-platform-model](https://github.com/sean-huni/dcre-platform-model), [dcre-platform-files](https://github.com/sean-huni/dcre-platform-files), [dcre-platform-batch](https://github.com/sean-huni/dcre-platform-batch), [dcre-platform-persistence](https://github.com/sean-huni/dcre-platform-persistence)
+- Infra and tooling: [dcre-infra](https://github.com/sean-huni/dcre-infra), [dcre-fixture-toolkit](https://github.com/sean-huni/dcre-fixture-toolkit), [dcre-design-register](https://github.com/sean-huni/dcre-design-register), [dcre-rpt](https://github.com/sean-huni/dcre-rpt)
