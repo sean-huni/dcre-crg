@@ -100,15 +100,25 @@ public class PsrReportService {
         this.sliceSize = sliceSize;
     }
 
-    /** @return the emitted PSR file path: the windowed delta, or the zero-valued heartbeat on zero delta. */
+    /** Job-less convenience (direct-service callers/tests): no batch execution, so job_name stays null. */
     public Optional<Path> window(final String client, final String windowKey, final boolean resend)
             throws IOException {
+        return window(client, windowKey, resend, null);
+    }
+
+    /**
+     * @param jobName SCRUM-58 clock-scoped trace anchor (env JOB_NAME or
+     *                {@code local-prg-<executionId>}), stamped on the report row.
+     * @return the emitted PSR file path: the windowed delta, or the zero-valued heartbeat on zero delta.
+     */
+    public Optional<Path> window(final String client, final String windowKey, final boolean resend,
+                                 final String jobName) throws IOException {
         warnUnknown(client);
         final List<StatusRow> first = readSlice(client, resend, "");
         final Path target = layout.resolve(client, ExchangeChannel.ONHOST_RESP, ExchangeSub.OUT)
                 .resolve(client + "_PSR_" + windowKey + ".txt");
         if (first.isEmpty()) {
-            return Optional.of(heartbeat(client, windowKey, target));
+            return Optional.of(heartbeat(client, windowKey, target, jobName));
         }
         if (heartbeatStands(target)) {
             // SCRUM-55 kill-resume guard (review prg-11): a heartbeat already stands
@@ -118,7 +128,7 @@ public class PsrReportService {
             // RJCT); the delta flows untouched to the NEXT window instead.
             log.info("report stage=PRG type=SCHEDULED client={} window={} reason=HEARTBEAT_STANDS"
                     + " action=defer-delta", client, windowKey);
-            return Optional.of(heartbeat(client, windowKey, target));
+            return Optional.of(heartbeat(client, windowKey, target, jobName));
         }
         if (!Files.exists(target)) {
             // R-24 restart no-op contract: an existing target means a prior
@@ -127,7 +137,7 @@ public class PsrReportService {
         }
         // R-29: the whole file is visible by now, so replaying the advance is safe
         // (upsert keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
-        advanceFromEmittedFile(client, target, openReport(client, "SCHEDULED", windowKey, target));
+        advanceFromEmittedFile(client, target, openReport(client, "SCHEDULED", windowKey, target, jobName));
         return Optional.of(target);
     }
 
@@ -156,8 +166,8 @@ public class PsrReportService {
      * between the move and the registry insert replays as skip-existing-file
      * + find-or-save.
      */
-    private Path heartbeat(final String client, final String windowKey, final Path target)
-            throws IOException {
+    private Path heartbeat(final String client, final String windowKey, final Path target,
+                           final String jobName) throws IOException {
         if (!Files.exists(target)) { // R-24: a standing emission is never rewritten
             try (StreamedPsrWrite psr = StreamedPsrWrite.begin(target,
                     "PSR|%s|%s".formatted(client, windowKey))) {
@@ -166,7 +176,7 @@ public class PsrReportService {
                 psr.commit();
             }
         }
-        openReport(client, "HEARTBEAT", windowKey, target);
+        openReport(client, "HEARTBEAT", windowKey, target, jobName);
         log.info("report stage=PRG type=HEARTBEAT client={} window={} file={}",
                 client, windowKey, target.getFileName());
         return target;
@@ -174,11 +184,11 @@ public class PsrReportService {
 
     /** SCRUM-55 report registry: find-or-save on the unique file_name so restarts reuse the row. */
     private UUID openReport(final String client, final String reportType, final String windowKey,
-                            final Path target) {
+                            final Path target, final String jobName) {
         final String fileName = target.getFileName().toString();
         return watermarkTx.execute(s -> reports.findByFileName(fileName)
                 .orElseGet(() -> reports.save(PrgReportEntity.of(
-                        client, reportType, "CLOCK", windowKey, null, fileName)))
+                        client, reportType, "CLOCK", windowKey, null, fileName, jobName)))
                 .getId());
     }
 

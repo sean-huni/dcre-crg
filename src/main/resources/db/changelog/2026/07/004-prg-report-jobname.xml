@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- SCRUM-58 file-trace: prg_report.job_name is the clock-scoped trace-join
+         anchor. Clock-launched PSR files have no single arrival, so rpt.v_flow_trace
+         joins their launching job's LAUNCH/OUTCOME ops steps via
+         agt_ops.launch_intent.job_name. Nullable + additive: zero rewrite of the
+         VARCHAR(63) seam-name contract (matches rpt_run.job_name). addColumn of a
+         nullable column and createIndex on it are metadata-only on CockroachDB
+         (no on-disk rewrite, no generated USING cast), so no modifySql strip is
+         needed here (unlike the indexed response_file widenings). -->
+
+    <changeSet id="004-prg-report-jobname" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="prg_report" columnName="job_name"/></not>
+        </preConditions>
+        <addColumn tableName="prg_report">
+            <column name="job_name" type="VARCHAR(63)"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="004-ix-prg-report-job" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="prg_report" indexName="ix_prg_report_job"/></not>
+        </preConditions>
+        <createIndex tableName="prg_report" indexName="ix_prg_report_job">
+            <column name="job_name"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

@@ -14,4 +14,12 @@ public interface PrgReportRepo extends CrudRepository<PrgReportEntity, UUID> {
 
     /** file_name is unique: the restart no-op lookup (a standing row means the emission already registered). */
     Optional<PrgReportEntity> findByFileName(String fileName);
+
+    /**
+     * SCRUM-58 clock-scoped trace: every PSR artifact emitted under one batch
+     * execution, addressable by its seam job_name (JOB_NAME env or
+     * {@code local-prg-<executionId>}); a supporter holding the seam name
+     * resolves the reports without needing an arrival.
+     */
+    List<PrgReportEntity> findByJobName(String jobName);
 }
