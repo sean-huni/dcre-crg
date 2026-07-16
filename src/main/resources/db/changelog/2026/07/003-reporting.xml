@@ -198,7 +198,7 @@
         <dropView viewName="ext_tx_status"/>
     </changeSet>
 
-    <changeSet id="003-ext-tx-status-v2" author="dcre">
+    <changeSet id="003-ext-tx-status-v2" author="dcre" runOnChange="true">
         <createView viewName="ext_tx_status" replaceIfExists="true"><![CDATA[
             SELECT t.arrival_id, t.sequence, t.e2e, h.client_token AS client,
                    em.outbound_msg_id, em.id AS emission_id, g.source_msg_id,
@@ -304,7 +304,7 @@
          at least one (client, e2e, status) tuple absent from the auto ledger rows.
          Bounded: everything correlates from crw_emission_group, never the whole
          tx_entry history. -->
-    <changeSet id="003-report-due-view" author="dcre">
+    <changeSet id="003-report-due-view" author="dcre" runOnChange="true">
         <createView viewName="prg_report_due" replaceIfExists="true"><![CDATA[
             SELECT g.client, g.source_msg_id,
                    CASE WHEN NOT EXISTS (SELECT 1 FROM ext_tx_status xc
@@ -330,7 +330,7 @@
         ]]></createView>
     </changeSet>
 
-    <changeSet id="003-sla-pending-view" author="dcre">
+    <changeSet id="003-sla-pending-view" author="dcre" runOnChange="true">
         <createView viewName="prg_sla_pending" replaceIfExists="true"><![CDATA[
             SELECT g.client, x.e2e, em.outbound_msg_id, em.visible_at,
                    EXTRACT(EPOCH FROM (now() - em.visible_at)) / 3600 AS age_hours
