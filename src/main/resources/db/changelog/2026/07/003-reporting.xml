@@ -176,14 +176,23 @@
              deterministic tiebreaker. One tx therefore never joins two rows of
              one table (no row multiplication, no nondeterministic status pick);
              prg_sla_pending reads this view and inherits the guarantee.
-         (2) NULL-emission fallback (reader fail-open ingest, pre-split legacy
-             rows) matches ONLY when NO emission exists for the arrival at all:
-             once any batch is resolved, batch-scoped rows are the only truth
-             (an unresolved row must never stand in alongside a resolved batch).
-             The fallback stays inside the parent's identity family: orgnl_msg_id
-             must equal the parent MsgId or one of its split children MsgId_N (a
-             bare-e2e join would re-open the A-40 cross-link for duplicate e2es).
-             Its latest-row selection runs within that same (family, e2e) scope. -->
+         (2) Legacy/unresolved NULL-emission rows (pre-SCRUM-55 backfill, reader
+             fail-open ingest) bind to a batch through the globally unique
+             outbound identity: emission_id IS NULL AND orgnl_msg_id =
+             em.outbound_msg_id (uq_emission_outbound_msg). A backfilled arrival
+             therefore keeps projecting its legacy statuses (re-review blocker:
+             every pre-SCRUM-55 row has emission_id NULL while its arrival DOES
+             have an emission); global uniqueness means such a row names exactly
+             one emission, so the A-40 cross-arrival cross-link stays closed. A
+             resolved (emission_id) row for the same (emission, e2e) outranks
+             its legacy twin so one tx never projects twice; within the legacy
+             class the latest row wins as in (1).
+         (3) The no-emission fallback matches ONLY when NO emission exists for
+             the arrival at all, and stays inside the parent's identity family:
+             orgnl_msg_id must equal the parent MsgId or one of its split
+             children MsgId_N (a bare-e2e join would re-open the A-40
+             cross-link for duplicate e2es). Its latest-row selection runs
+             within that same (family, e2e) scope. -->
     <changeSet id="003-drop-ext-tx-status-v1" author="dcre">
         <preConditions onFail="MARK_RAN"><viewExists viewName="ext_tx_status"/></preConditions>
         <dropView viewName="ext_tx_status"/>
@@ -212,6 +221,15 @@
                                       AND (i2.created_at > i.created_at
                                            OR (i2.created_at = i.created_at
                                                AND i2.response_file > i.response_file))))
+                OR (i.emission_id IS NULL AND i.orgnl_msg_id = em.outbound_msg_id
+                    AND NOT EXISTS (SELECT 1 FROM isr_resp ir
+                                    WHERE ir.emission_id = em.id AND ir.e2e = t.e2e)
+                    AND NOT EXISTS (SELECT 1 FROM isr_resp i2
+                                    WHERE i2.emission_id IS NULL AND i2.e2e = t.e2e
+                                      AND i2.orgnl_msg_id = em.outbound_msg_id
+                                      AND (i2.created_at > i.created_at
+                                           OR (i2.created_at = i.created_at
+                                               AND i2.response_file > i.response_file))))
                 OR (i.emission_id IS NULL
                     AND NOT EXISTS (SELECT 1 FROM crw_emission pe WHERE pe.arrival_id = t.arrival_id)
                     AND (i.orgnl_msg_id = h.msg_id OR i.orgnl_msg_id LIKE h.msg_id || '\_%')
@@ -229,6 +247,15 @@
                                       AND (sb2.created_at > sb.created_at
                                            OR (sb2.created_at = sb.created_at
                                                AND sb2.response_file > sb.response_file))))
+                OR (sb.emission_id IS NULL AND sb.orgnl_msg_id = em.outbound_msg_id
+                    AND NOT EXISTS (SELECT 1 FROM sbsr_resp sbr
+                                    WHERE sbr.emission_id = em.id AND sbr.e2e = t.e2e)
+                    AND NOT EXISTS (SELECT 1 FROM sbsr_resp sb2
+                                    WHERE sb2.emission_id IS NULL AND sb2.e2e = t.e2e
+                                      AND sb2.orgnl_msg_id = em.outbound_msg_id
+                                      AND (sb2.created_at > sb.created_at
+                                           OR (sb2.created_at = sb.created_at
+                                               AND sb2.response_file > sb.response_file))))
                 OR (sb.emission_id IS NULL
                     AND NOT EXISTS (SELECT 1 FROM crw_emission pe WHERE pe.arrival_id = t.arrival_id)
                     AND (sb.orgnl_msg_id = h.msg_id OR sb.orgnl_msg_id LIKE h.msg_id || '\_%')
@@ -243,6 +270,15 @@
                    (p.emission_id = em.id
                     AND NOT EXISTS (SELECT 1 FROM pbsr_resp p2
                                     WHERE p2.emission_id = em.id AND p2.e2e = t.e2e
+                                      AND (p2.created_at > p.created_at
+                                           OR (p2.created_at = p.created_at
+                                               AND p2.response_file > p.response_file))))
+                OR (p.emission_id IS NULL AND p.orgnl_msg_id = em.outbound_msg_id
+                    AND NOT EXISTS (SELECT 1 FROM pbsr_resp pr
+                                    WHERE pr.emission_id = em.id AND pr.e2e = t.e2e)
+                    AND NOT EXISTS (SELECT 1 FROM pbsr_resp p2
+                                    WHERE p2.emission_id IS NULL AND p2.e2e = t.e2e
+                                      AND p2.orgnl_msg_id = em.outbound_msg_id
                                       AND (p2.created_at > p.created_at
                                            OR (p2.created_at = p.created_at
                                                AND p2.response_file > p.response_file))))

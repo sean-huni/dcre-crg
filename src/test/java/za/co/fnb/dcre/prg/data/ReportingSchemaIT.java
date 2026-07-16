@@ -26,9 +26,13 @@ import static org.assertj.core.api.Assertions.entry;
  * prg_report_due SQL is DEFINED by these cases):
  * (a) ext_tx_status v2 is batch-scoped: an identical e2e under a different
  *     arrival no longer cross-links a response (A-40 guard); a response with
- *     emission_id NULL projects ONLY when its arrival has NO emission at all
- *     (legacy/pre-split truth, review prg-12) and only within its parent
- *     identity family (orgnl_msg_id = parent MsgId or a split child MsgId_N);
+ *     emission_id NULL binds to a batch via the globally unique outbound
+ *     identity (orgnl_msg_id = crw_emission.outbound_msg_id), so backfilled
+ *     pre-SCRUM-55 legacy rows keep projecting (re-review of prg-12), with a
+ *     resolved row for the same (emission, e2e) outranking its legacy twin;
+ *     without such a binding the row projects ONLY when its arrival has NO
+ *     emission at all, and only within its parent identity family
+ *     (orgnl_msg_id = parent MsgId or a split child MsgId_N);
  *     per response table only the LATEST row per (emission, e2e) projects
  *     (max created_at, response_file tiebreaker), so a resend or a second
  *     response file for one emission never multiplies rows or flip-flops the
@@ -218,8 +222,8 @@ class ReportingSchemaIT {
     }
 
     @Test
-    void nullEmissionFallbackOnlyMatchesWhenNoEmissionExistsForTheArrival() {
-        // A-40 guard shape (review prg-12): the SAME e2e in TWO arrivals;
+    void nullEmissionRowBindsToItsNamedBatchAndNeverCrossLinks() {
+        // A-40 guard shape (re-review of prg-12): the SAME e2e in TWO arrivals;
         // arrival-1 resolved a batch, arrival-2 is legacy (no emission at all).
         UUID a1 = parent("FNBRF04", "MSGN1");
         tx(a1, 1, "E2ENUL");
@@ -227,13 +231,13 @@ class ReportingSchemaIT {
         member(b1, 1, "E2ENUL");
         UUID a2 = parent("FNBRF04", "MSGN2");
         tx(a2, 1, "E2ENUL"); // deliberately NO emission: pre-split legacy data
-        respAt("pbsr_resp", null, "MSGN1", "E2ENUL", "ACSC", "RESP_NUL_P1.xml", 0); // unresolved, names parent-1
+        respAt("pbsr_resp", null, "MSGN1", "E2ENUL", "ACSC", "RESP_NUL_P1.xml", 0); // NULL emission, names batch-1's outbound
 
-        // parent-1 resolved a batch: batch-scoped responses are the only truth
-        // there; the unresolved row must neither stand in alongside the batch
-        // nor cross-link to parent-2 (whose family it does not name).
-        assertThat(ext(a1, "E2ENUL").status()).isEqualTo("CTV_PASS");
-        assertThat(ext(a1, "E2ENUL").terminal()).isFalse();
+        // The NULL-emission row names batch-1's globally unique outbound, so it
+        // projects THERE (legacy truth on a backfilled arrival) and never
+        // cross-links to parent-2 (whose family it does not name).
+        assertThat(ext(a1, "E2ENUL").status()).isEqualTo("ACSC");
+        assertThat(ext(a1, "E2ENUL").terminal()).isTrue();
         assertThat(ext(a2, "E2ENUL").status()).isEqualTo("CTV_PASS");
 
         respAt("pbsr_resp", null, "MSGN2", "E2ENUL", "ACSP", "RESP_NUL_P2.xml", 0); // legacy, names parent-2
@@ -241,6 +245,29 @@ class ReportingSchemaIT {
         assertThat(ext(a2, "E2ENUL").status()).isEqualTo("ACSP"); // no emission at all: fail-open truth
         assertThat(extCount(a1, "E2ENUL")).isEqualTo(1L);
         assertThat(extCount(a2, "E2ENUL")).isEqualTo(1L);
+    }
+
+    @Test
+    void legacyNullEmissionRowOnBackfilledArrivalProjectsViaOutboundIdentity() {
+        // Re-review blocker: every pre-SCRUM-55 legacy response row has
+        // emission_id NULL while its BACKFILLED arrival does have an emission;
+        // the row still names the batch uniquely via orgnl_msg_id equal to the
+        // backfilled outbound_msg_id (globally unique), so its status must
+        // project instead of silently vanishing from ext_tx_status and
+        // prg_sla_pending.
+        String client = "FNBRF08";
+        UUID a = parent(client, "MSGLG1");
+        tx(a, 1, "E2ELGCY");
+        UUID b = batch(group(a, client, "MSGLG1", 1), a, 1, "MSGLG1");
+        member(b, 1, "E2ELGCY");
+        resp("isr_resp", null, "MSGLG1", "E2ELGCY", "ACSC", null); // legacy-shaped: NULL emission, orgnl = outbound
+
+        ExtRow row = ext(a, "E2ELGCY");
+        assertThat(row.status()).isEqualTo("ACSC");
+        assertThat(row.terminal()).isTrue();
+        assertThat(row.emissionId()).isEqualTo(b); // bound to the backfilled batch, not floating
+        assertThat(extCount(a, "E2ELGCY")).isEqualTo(1L);
+        assertThat(slaCount(client)).isZero(); // prg_sla_pending inherits: the terminal legacy status ages nothing
     }
 
     @Test
