@@ -143,12 +143,15 @@ class PsrReportServiceSliceTest {
     }
 
     @Test
-    void restartWithExistingTargetSkipsRewriteButAdvancesMissingWatermarks() throws Exception {
+    void restartWithExistingTargetAdvancesExactlyTheStandingFileAndDefersTheDelta() throws Exception {
         String client = "FNBT14";
         cleanExchange(client, "s1");
+        cleanExchange(client, "s2");
         seed(client, 5, 0);
         // Crash simulation: prior run emitted the file (R-24: existing target = prior
-        // emission) and died before any watermark advance.
+        // emission) and died before any watermark advance. The sentinel line proves
+        // the replay advances the FILE's content, never a fresh delta re-read
+        // (review prg-12 honesty: the ledger records what was externally reported).
         Files.createDirectories(target(client, "s1").getParent());
         List<String> sentinel = List.of("PSR|" + client + "|s1", "TX|sentinel|X", "END|1");
         Files.write(target(client, "s1"), sentinel);
@@ -158,9 +161,23 @@ class PsrReportServiceSliceTest {
         assertEquals(Optional.of(target(client, "s1")), emitted, "the standing emission is reported");
         assertEquals(sentinel, Files.readAllLines(target(client, "s1")),
                 "restart never rewrites an existing target (R-24 no-op)");
-        assertEquals(5, jdbc.queryForObject(
+        assertEquals(List.of("sentinel|X"), jdbc.queryForList(
+                "SELECT concat(e2e, '|', last_status) FROM prg_watermark WHERE client=?",
+                String.class, client),
+                "the replay advances EXACTLY the standing file's lines (R-29 second phase)");
+        assertEquals(List.of("sentinel|X"), jdbc.queryForList(
+                "SELECT concat(e2e, '|', status) FROM prg_delivery_ledger WHERE client=?",
+                String.class, client),
+                "the ledger holds only what a visible file carried");
+
+        // the 5 seeded rows were in NO emitted file: they ride the next window
+        Optional<Path> next = service.window(client, "s2", false);
+        assertTrue(next.isPresent(), "the deferred delta emits on the next window");
+        assertEquals(5, Files.readAllLines(next.get()).stream().filter(l -> l.startsWith("TX|")).count(),
+                "all 5 deferred rows reach the next window's file");
+        assertEquals(6, jdbc.queryForObject(
                 "SELECT count(*) FROM prg_watermark WHERE client=?", Integer.class, client),
-                "the replay still advances the missing watermarks (R-29 second phase)");
+                "sentinel + the 5 deferred rows are advanced after the next window");
     }
 
     @Test

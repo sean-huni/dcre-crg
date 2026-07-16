@@ -25,12 +25,14 @@ import static org.assertj.core.api.Assertions.entry;
  * SCRUM-55 Task 9 schema contract (the plan's deliberately-unfrozen
  * prg_report_due SQL is DEFINED by these cases):
  * (a) ext_tx_status v2 is batch-scoped: an identical e2e under a different
- *     arrival no longer cross-links a response (A-40 guard); a legacy
- *     response with emission_id NULL still projects (fail-open ingest truth)
- *     but ONLY within its parent's identity family (orgnl_msg_id = parent
- *     MsgId or a split child MsgId_N), so the dup-e2e x NULL-emission
- *     collision cannot cross-link either; a resolved row beats its own
- *     NULL-emission twin (no duplicate view rows per (arrival, sequence)).
+ *     arrival no longer cross-links a response (A-40 guard); a response with
+ *     emission_id NULL projects ONLY when its arrival has NO emission at all
+ *     (legacy/pre-split truth, review prg-12) and only within its parent
+ *     identity family (orgnl_msg_id = parent MsgId or a split child MsgId_N);
+ *     per response table only the LATEST row per (emission, e2e) projects
+ *     (max created_at, response_file tiebreaker), so a resend or a second
+ *     response file for one emission never multiplies rows or flip-flops the
+ *     status pick; prg_sla_pending reads ext_tx_status and inherits this.
  * (b) prg_delivery_ledger auto rows are DB-arbitrated once per
  *     (client, e2e, status); manual_ref rows bypass the guard but ledger.
  * (c) prg_report_due lists COMPLETE (all members terminal, immediately) and
@@ -133,12 +135,38 @@ class ReportingSchemaIT {
         }
     }
 
+    /**
+     * Latest-row fixture seed: explicit response_file plus a backdated
+     * created_at (and updated_at, for the due-view debounce) so resend twins
+     * of one (emission, e2e) carry a deterministic recency order.
+     */
+    void respAt(String table, UUID emissionId, String orgnlMsgId, String e2e, String status,
+                String responseFile, int createdAgoSeconds) {
+        jdbc.update("INSERT INTO " + table + " (response_file, orgnl_msg_id, e2e, status, emission_id)"
+                        + " VALUES (?,?,?,?,?)", responseFile, orgnlMsgId, e2e, status, emissionId);
+        jdbc.update("UPDATE " + table + " SET created_at = now() - INTERVAL '" + createdAgoSeconds
+                + " seconds', updated_at = now() - INTERVAL '" + createdAgoSeconds
+                + " seconds' WHERE response_file = ?", responseFile);
+    }
+
     ExtRow ext(UUID arrival, String e2e) {
         return jdbc.queryForObject("SELECT status, terminal, emission_id, outbound_msg_id, source_msg_id"
                         + " FROM ext_tx_status WHERE arrival_id = ? AND e2e = ?",
                 (rs, i) -> new ExtRow(rs.getString("status"), rs.getBoolean("terminal"),
                         (UUID) rs.getObject("emission_id"), rs.getString("outbound_msg_id"),
                         rs.getString("source_msg_id")), arrival, e2e);
+    }
+
+    long extCount(UUID arrival, String e2e) {
+        Long count = jdbc.queryForObject("SELECT count(*) FROM ext_tx_status WHERE arrival_id = ?"
+                + " AND e2e = ?", Long.class, arrival, e2e);
+        return count == null ? -1 : count;
+    }
+
+    long slaCount(String client) {
+        Long count = jdbc.queryForObject("SELECT count(*) FROM prg_sla_pending WHERE client = ?",
+                Long.class, client);
+        return count == null ? -1 : count;
     }
 
     Map<String, String> due(String client) {
@@ -190,20 +218,65 @@ class ReportingSchemaIT {
     }
 
     @Test
-    void nullEmissionResponseScopesToItsParentIdentityNotEveryDuplicateE2e() {
+    void nullEmissionFallbackOnlyMatchesWhenNoEmissionExistsForTheArrival() {
+        // A-40 guard shape (review prg-12): the SAME e2e in TWO arrivals;
+        // arrival-1 resolved a batch, arrival-2 is legacy (no emission at all).
         UUID a1 = parent("FNBRF04", "MSGN1");
         tx(a1, 1, "E2ENUL");
         UUID b1 = batch(group(a1, "FNBRF04", "MSGN1", 1), a1, 1, "MSGN1");
         member(b1, 1, "E2ENUL");
         UUID a2 = parent("FNBRF04", "MSGN2");
-        tx(a2, 1, "E2ENUL");
-        UUID b2 = batch(group(a2, "FNBRF04", "MSGN2", 1), a2, 1, "MSGN2");
-        member(b2, 1, "E2ENUL");
-        resp("pbsr_resp", null, "MSGN1", "E2ENUL", "ACSC", null); // unresolved reply naming parent-1
+        tx(a2, 1, "E2ENUL"); // deliberately NO emission: pre-split legacy data
+        respAt("pbsr_resp", null, "MSGN1", "E2ENUL", "ACSC", "RESP_NUL_P1.xml", 0); // unresolved, names parent-1
 
-        assertThat(ext(a1, "E2ENUL").status()).isEqualTo("ACSC");     // scoped to ITS parent
-        assertThat(ext(a2, "E2ENUL").status()).isEqualTo("CTV_PASS"); // dup-e2e collision closed
-        assertThat(ext(a2, "E2ENUL").terminal()).isFalse();
+        // parent-1 resolved a batch: batch-scoped responses are the only truth
+        // there; the unresolved row must neither stand in alongside the batch
+        // nor cross-link to parent-2 (whose family it does not name).
+        assertThat(ext(a1, "E2ENUL").status()).isEqualTo("CTV_PASS");
+        assertThat(ext(a1, "E2ENUL").terminal()).isFalse();
+        assertThat(ext(a2, "E2ENUL").status()).isEqualTo("CTV_PASS");
+
+        respAt("pbsr_resp", null, "MSGN2", "E2ENUL", "ACSP", "RESP_NUL_P2.xml", 0); // legacy, names parent-2
+
+        assertThat(ext(a2, "E2ENUL").status()).isEqualTo("ACSP"); // no emission at all: fail-open truth
+        assertThat(extCount(a1, "E2ENUL")).isEqualTo(1L);
+        assertThat(extCount(a2, "E2ENUL")).isEqualTo(1L);
+    }
+
+    @Test
+    void secondResponseFileForTheSameEmissionProjectsOnlyTheNewestStatus() {
+        String client = "FNBRF06";
+        UUID a = parent(client, "MSGRS1");
+        tx(a, 1, "E2ERSND");
+        UUID b = batch(group(a, client, "MSGRS1", 1), a, 1, "MSGRS1");
+        member(b, 1, "E2ERSND");
+        respAt("pbsr_resp", b, "MSGRS1", "E2ERSND", "ACSP", "RESP_RSND_FIRST.xml", 300);
+
+        assertThat(ext(a, "E2ERSND").status()).isEqualTo("ACSP");
+        assertThat(slaCount(client)).isEqualTo(1L); // interim member of a VISIBLE batch ages
+
+        // resend: a SECOND response file arrives for the SAME (emission, e2e)
+        respAt("pbsr_resp", b, "MSGRS1", "E2ERSND", "ACSC", "RESP_RSND_SECOND.xml", 0);
+
+        assertThat(extCount(a, "E2ERSND")).isEqualTo(1L); // no row multiplication
+        assertThat(ext(a, "E2ERSND").status()).isEqualTo("ACSC"); // newest created_at wins
+        assertThat(ext(a, "E2ERSND").terminal()).isTrue();
+        assertThat(slaCount(client)).isZero(); // the stale interim row cannot resurrect the member
+    }
+
+    @Test
+    void equalTimestampResponseTwinsTieBreakDeterministicallyOnResponseFile() {
+        String client = "FNBRF07";
+        UUID a = parent(client, "MSGTB1");
+        tx(a, 1, "E2ETIE");
+        UUID b = batch(group(a, client, "MSGTB1", 1), a, 1, "MSGTB1");
+        member(b, 1, "E2ETIE");
+        respAt("isr_resp", b, "MSGTB1", "E2ETIE", "ACSP", "RESP_TIE_A.xml", 0);
+        respAt("isr_resp", b, "MSGTB1", "E2ETIE", "ACTC", "RESP_TIE_B.xml", 0);
+        jdbc.update("UPDATE isr_resp SET created_at = '2026-07-16 08:00:00+00' WHERE e2e = 'E2ETIE'");
+
+        assertThat(extCount(a, "E2ETIE")).isEqualTo(1L);
+        assertThat(ext(a, "E2ETIE").status()).isEqualTo("ACTC"); // greater response_file wins the tie
     }
 
     @Test

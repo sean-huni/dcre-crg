@@ -17,9 +17,11 @@ import za.co.fnb.dcre.prg.data.repo.PrgDeliveryLedgerRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgReportRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -39,10 +41,12 @@ import java.util.UUID;
  *
  * <p>R-29 order preserved: the WHOLE file becomes visible first (streamed tmp
  * + ATOMIC_MOVE), then watermarks advance in per-slice REQUIRES_NEW
- * transactions. A crash between the two replays as skip-existing-file +
- * watermark advance from a fresh delta read: the existing restart semantics,
- * which the advance phase now uses on EVERY run (it re-reads the same keyset
- * slices rather than holding the streamed rows).
+ * transactions. Review prg-12 honesty: the advance phase re-reads the
+ * COMMITTED target in slice-sized batches and ledgers/watermarks EXACTLY its
+ * TX lines, never a fresh delta re-read (a status that moved between the
+ * stream and the advance was never in the emitted file: it stays unledgered
+ * at the new status and rides the next window). A crash between the two
+ * phases replays as skip-existing-file + the same advance-from-file.
  *
  * <p>SCRUM-55: every scheduled emission registers a prg_report row (restart
  * reuses it, file_name is unique) and the advance phase ledgers each advanced
@@ -123,7 +127,7 @@ public class PsrReportService {
         }
         // R-29: the whole file is visible by now, so replaying the advance is safe
         // (upsert keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
-        advanceWatermarks(client, resend, openReport(client, "SCHEDULED", windowKey, target));
+        advanceFromEmittedFile(client, target, openReport(client, "SCHEDULED", windowKey, target));
         return Optional.of(target);
     }
 
@@ -217,23 +221,35 @@ public class PsrReportService {
     }
 
     /**
-     * R-29 second phase: re-reads the same keyset slices and upserts each in
-     * a bounded REQUIRES_NEW transaction (fresh tx per CrdbRetry attempt).
-     * Advanced delta rows drop out of later slices; the keyset resume keeps
-     * both delta and resend reads bounded and forward-only.
+     * R-29 second phase, review prg-12 honesty: the emitted file is the ONLY
+     * truth of what was externally reported, so the advance streams the
+     * committed target back (bounded: one slice-sized batch of TX lines in
+     * heap at a time) and ledgers/watermarks exactly those (e2e, status)
+     * tuples in per-batch REQUIRES_NEW transactions (fresh tx per CrdbRetry
+     * attempt). A fresh delta re-read here could ledger a status that moved
+     * AFTER the file was written and was therefore never delivered; such
+     * rows now stay unledgered and ride the next window's delta. The same
+     * path replays after a crash: a standing target is advanced as written.
      */
-    private void advanceWatermarks(final String client, final boolean resend, final UUID reportId) {
-        String after = "";
-        while (true) {
-            final List<StatusRow> slice = readSlice(client, resend, after);
-            if (slice.isEmpty()) {
-                return;
+    private void advanceFromEmittedFile(final String client, final Path target, final UUID reportId)
+            throws IOException {
+        try (BufferedReader psr = Files.newBufferedReader(target)) {
+            final List<StatusRow> batch = new ArrayList<>(sliceSize);
+            String line;
+            while ((line = psr.readLine()) != null) {
+                if (!line.startsWith("TX|")) {
+                    continue; // header/trailer; heartbeats never reach this phase
+                }
+                final String[] parts = line.split("\\|", 3);
+                batch.add(new StatusRow(parts[1], parts[2]));
+                if (batch.size() == sliceSize) {
+                    advanceSlice(client, reportId, List.copyOf(batch));
+                    batch.clear();
+                }
             }
-            advanceSlice(client, reportId, slice);
-            if (slice.size() < sliceSize) {
-                return;
+            if (!batch.isEmpty()) {
+                advanceSlice(client, reportId, batch);
             }
-            after = slice.getLast().e2e();
         }
     }
 

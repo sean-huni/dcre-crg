@@ -167,15 +167,23 @@
 
     <!-- ext_tx_status v2: batch-scoped response joins close the A-40 cross-arrival
          e2e cross-link. CRDB CREATE OR REPLACE VIEW cannot reorder/insert columns,
-         so v1 (001's 002-ext-tx-status-prg) is dropped first. Responses with
-         emission_id NULL (reader fail-open ingest, pre-split legacy rows) stay
-         truth even when CRW's registry is behind (spec section 6), but ONLY
-         inside their parent's identity family: orgnl_msg_id must equal the
-         parent MsgId or one of its split children MsgId_N (a bare-e2e join
-         would re-open the A-40 cross-link for duplicate e2es, projecting and
-         ledgering a status against the wrong parent). A resolved (batch-scoped)
-         row beats its own NULL-emission twin so one (arrival, sequence) never
-         projects twice (no duplicate TX lines / double ledger tuples). -->
+         so v1 (001's 002-ext-tx-status-prg) is dropped first.
+         Review prg-12 semantics:
+         (1) Latest-row-per-source: isr/sbsr/pbsr keep one row per (response_file,
+             e2e), so a resend or a second response file for the same emission
+             stores twins. Per response table only the LATEST row per
+             (emission, e2e) projects: max created_at, response_file as the
+             deterministic tiebreaker. One tx therefore never joins two rows of
+             one table (no row multiplication, no nondeterministic status pick);
+             prg_sla_pending reads this view and inherits the guarantee.
+         (2) NULL-emission fallback (reader fail-open ingest, pre-split legacy
+             rows) matches ONLY when NO emission exists for the arrival at all:
+             once any batch is resolved, batch-scoped rows are the only truth
+             (an unresolved row must never stand in alongside a resolved batch).
+             The fallback stays inside the parent's identity family: orgnl_msg_id
+             must equal the parent MsgId or one of its split children MsgId_N (a
+             bare-e2e join would re-open the A-40 cross-link for duplicate e2es).
+             Its latest-row selection runs within that same (family, e2e) scope. -->
     <changeSet id="003-drop-ext-tx-status-v1" author="dcre">
         <preConditions onFail="MARK_RAN"><viewExists viewName="ext_tx_status"/></preConditions>
         <dropView viewName="ext_tx_status"/>
@@ -197,21 +205,57 @@
                    AND EXISTS (SELECT 1 FROM crw_emission_member m
                                WHERE m.emission_id = em.id AND m.sequence = t.sequence)
             LEFT JOIN crw_emission_group g ON g.id = em.group_id
-            LEFT JOIN isr_resp  i  ON i.e2e  = t.e2e AND (i.emission_id  = em.id
-                   OR (i.emission_id IS NULL
-                       AND (i.orgnl_msg_id = h.msg_id OR i.orgnl_msg_id LIKE h.msg_id || '\_%')
-                       AND NOT EXISTS (SELECT 1 FROM isr_resp i2
-                                       WHERE i2.e2e = t.e2e AND i2.emission_id = em.id)))
-            LEFT JOIN sbsr_resp sb ON sb.e2e = t.e2e AND (sb.emission_id = em.id
-                   OR (sb.emission_id IS NULL
-                       AND (sb.orgnl_msg_id = h.msg_id OR sb.orgnl_msg_id LIKE h.msg_id || '\_%')
-                       AND NOT EXISTS (SELECT 1 FROM sbsr_resp sb2
-                                       WHERE sb2.e2e = t.e2e AND sb2.emission_id = em.id)))
-            LEFT JOIN pbsr_resp p  ON p.e2e  = t.e2e AND (p.emission_id  = em.id
-                   OR (p.emission_id IS NULL
-                       AND (p.orgnl_msg_id = h.msg_id OR p.orgnl_msg_id LIKE h.msg_id || '\_%')
-                       AND NOT EXISTS (SELECT 1 FROM pbsr_resp p2
-                                       WHERE p2.e2e = t.e2e AND p2.emission_id = em.id)))
+            LEFT JOIN isr_resp  i  ON i.e2e  = t.e2e AND (
+                   (i.emission_id = em.id
+                    AND NOT EXISTS (SELECT 1 FROM isr_resp i2
+                                    WHERE i2.emission_id = em.id AND i2.e2e = t.e2e
+                                      AND (i2.created_at > i.created_at
+                                           OR (i2.created_at = i.created_at
+                                               AND i2.response_file > i.response_file))))
+                OR (i.emission_id IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM crw_emission pe WHERE pe.arrival_id = t.arrival_id)
+                    AND (i.orgnl_msg_id = h.msg_id OR i.orgnl_msg_id LIKE h.msg_id || '\_%')
+                    AND NOT EXISTS (SELECT 1 FROM isr_resp i2
+                                    WHERE i2.emission_id IS NULL AND i2.e2e = t.e2e
+                                      AND (i2.orgnl_msg_id = h.msg_id
+                                           OR i2.orgnl_msg_id LIKE h.msg_id || '\_%')
+                                      AND (i2.created_at > i.created_at
+                                           OR (i2.created_at = i.created_at
+                                               AND i2.response_file > i.response_file)))))
+            LEFT JOIN sbsr_resp sb ON sb.e2e = t.e2e AND (
+                   (sb.emission_id = em.id
+                    AND NOT EXISTS (SELECT 1 FROM sbsr_resp sb2
+                                    WHERE sb2.emission_id = em.id AND sb2.e2e = t.e2e
+                                      AND (sb2.created_at > sb.created_at
+                                           OR (sb2.created_at = sb.created_at
+                                               AND sb2.response_file > sb.response_file))))
+                OR (sb.emission_id IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM crw_emission pe WHERE pe.arrival_id = t.arrival_id)
+                    AND (sb.orgnl_msg_id = h.msg_id OR sb.orgnl_msg_id LIKE h.msg_id || '\_%')
+                    AND NOT EXISTS (SELECT 1 FROM sbsr_resp sb2
+                                    WHERE sb2.emission_id IS NULL AND sb2.e2e = t.e2e
+                                      AND (sb2.orgnl_msg_id = h.msg_id
+                                           OR sb2.orgnl_msg_id LIKE h.msg_id || '\_%')
+                                      AND (sb2.created_at > sb.created_at
+                                           OR (sb2.created_at = sb.created_at
+                                               AND sb2.response_file > sb.response_file)))))
+            LEFT JOIN pbsr_resp p  ON p.e2e  = t.e2e AND (
+                   (p.emission_id = em.id
+                    AND NOT EXISTS (SELECT 1 FROM pbsr_resp p2
+                                    WHERE p2.emission_id = em.id AND p2.e2e = t.e2e
+                                      AND (p2.created_at > p.created_at
+                                           OR (p2.created_at = p.created_at
+                                               AND p2.response_file > p.response_file))))
+                OR (p.emission_id IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM crw_emission pe WHERE pe.arrival_id = t.arrival_id)
+                    AND (p.orgnl_msg_id = h.msg_id OR p.orgnl_msg_id LIKE h.msg_id || '\_%')
+                    AND NOT EXISTS (SELECT 1 FROM pbsr_resp p2
+                                    WHERE p2.emission_id IS NULL AND p2.e2e = t.e2e
+                                      AND (p2.orgnl_msg_id = h.msg_id
+                                           OR p2.orgnl_msg_id LIKE h.msg_id || '\_%')
+                                      AND (p2.created_at > p.created_at
+                                           OR (p2.created_at = p.created_at
+                                               AND p2.response_file > p.response_file)))))
             LEFT JOIN prg_status_class sc ON sc.code = COALESCE(p.status, sb.status, i.status)
         ]]></createView>
     </changeSet>
