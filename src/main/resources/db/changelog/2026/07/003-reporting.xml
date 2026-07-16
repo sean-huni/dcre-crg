@@ -173,25 +173,54 @@
          the AGT ReportTrigger (ConcurrentExecution.SKIP). The stack is rebuilt
          set-based: one window pass per response table (the pick views below),
          hash joins everywhere else, and supporting composite indexes here. -->
-    <changeSet id="003-reporting-read-indexes" author="dcre">
+    <!-- Per-index changesets with indexExists MARK_RAN guards (file convention,
+         persistence.md): each converges independently on any reachable DB state,
+         including databases that already carry one of these indexes (e.g. from
+         the interim unsplit 003-reporting-read-indexes changeset). -->
+    <changeSet id="003-ix-prg-isr-emission-e2e-created" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created"/></not></preConditions>
         <createIndex tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created">
             <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
         </createIndex>
+    </changeSet>
+
+    <changeSet id="003-ix-prg-sbsr-emission-e2e-created" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created"/></not></preConditions>
         <createIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created">
             <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
         </createIndex>
+    </changeSet>
+
+    <changeSet id="003-ix-prg-pbsr-emission-e2e-created" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created"/></not></preConditions>
         <createIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created">
             <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
         </createIndex>
+    </changeSet>
+
+    <changeSet id="003-ix-prg-isr-orgnl-e2e" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e"/></not></preConditions>
         <createIndex tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e">
             <column name="orgnl_msg_id"/><column name="e2e"/>
         </createIndex>
+    </changeSet>
+
+    <changeSet id="003-ix-prg-sbsr-orgnl-e2e" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e"/></not></preConditions>
         <createIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e">
             <column name="orgnl_msg_id"/><column name="e2e"/>
         </createIndex>
+    </changeSet>
+
+    <changeSet id="003-ix-prg-pbsr-orgnl-e2e" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e"/></not></preConditions>
         <createIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e">
             <column name="orgnl_msg_id"/><column name="e2e"/>
         </createIndex>
+    </changeSet>
+
+    <changeSet id="003-ix-prg-emission-group" author="dcre">
+        <preConditions onFail="MARK_RAN"><not><indexExists tableName="crw_emission" indexName="ix_prg_emission_group"/></not></preConditions>
         <createIndex tableName="crw_emission" indexName="ix_prg_emission_group">
             <column name="group_id"/>
         </createIndex>

@@ -391,6 +391,24 @@ class ReportingSchemaIT {
         assertThat(due(client)).containsOnly(entry("MSGC", "COMPLETE"), entry("MSGI", "IDLE"));
     }
 
+    @Test
+    void partialEmissionParentWithAllPresentMembersTerminalClassifiesIdleNeverComplete() {
+        // Boundary pin (review MINOR): the group's helper total_tx is 2, but only
+        // ONE member was ever emitted (partial emission: the second tx never made
+        // a batch). Every PRESENT member is terminal and the responses aged past
+        // the 120s debounce; completeness is judged against total_tx, so the
+        // parent must classify IDLE and never COMPLETE.
+        String client = "FNBCC02";
+        UUID ap = parent(client, "MSGPART");
+        tx(ap, 1, "EPB1");
+        tx(ap, 2, "EPB2");
+        UUID bp = batch(group(ap, client, "MSGPART", 1), ap, 1, "MSGPART");
+        member(bp, 1, "EPB1"); // EPB2 deliberately never emitted
+        resp("pbsr_resp", bp, "EPB1", "ACSC", 300); // terminal, aged past debounce
+
+        assertThat(due(client)).containsOnly(entry("MSGPART", "IDLE"));
+    }
+
     // --- (d) unknown status code fails closed as interim ---
 
     @Test
