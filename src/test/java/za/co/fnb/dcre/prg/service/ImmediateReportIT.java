@@ -36,12 +36,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * (4) the tasklet dispatches report.type=IMMEDIATE launches per parent with
  *     per-parent window keys (prg_report.file_name is unique);
  * (5) negative: an unknown report.type fails the job; an unknown report.id
- *     rejects the replay.
+ *     rejects the replay;
+ * (6) MANUAL regenerate-from-current-status bypasses the auto guard, ledgers
+ *     with the manual_ref and stamps report_type MANUAL (keyset-paginated:
+ *     psr-slice-size is 2 here so 3 rows take two slices);
+ * (7) the tasklet dispatches report.type=MANUAL + parents + manual.ref;
+ * (8)+(9) kill-resume (Task 16 chaos contract): a restart after ledger slices
+ *     committed but before the file's ATOMIC_MOVE re-renders the pre-crash
+ *     ledgered lines instead of silently dropping them.
  * Clients come from the FNBT isolation pool + FNBCC01 (one per test: ledger
  * tuples and report file names are client-global).
  */
 @SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
-        "DCRE_EXCHANGE_ROOT=build/test-exchange"})
+        "DCRE_EXCHANGE_ROOT=build/test-exchange", "dcre.prg.psr-slice-size=2"})
 class ImmediateReportIT {
 
     static final CockroachContainer CRDB =
@@ -277,6 +284,134 @@ class ImmediateReportIT {
                 "PSR|" + client + "|immjob1-2", "TX|E2EJOB2|ACSC", "END|1");
         assertThat(autoLedgerRows(client)).containsExactly(
                 new LedgerRow("E2EJOB1", "ACSC"), new LedgerRow("E2EJOB2", "ACSC"));
+    }
+
+    // --- (6) MANUAL regenerate: guard bypassed, keyset-paginated, manual_ref audited, MANUAL stamped ---
+
+    @Test
+    void manualRegenerateResendsAllCurrentStatusesBypassingTheGuard() throws Exception {
+        String client = "FNBT12";
+        cleanExchange(client, client + "_PSR_man-1.txt", client + "_PSR_man-2.txt");
+        UUID arrival = parent(client, "MSGMAN");
+        UUID b = batch(group(arrival, client, "MSGMAN", 1), arrival, 1, "MSGMAN");
+        tx(arrival, 1, "E2EMAN1", true);
+        member(b, 1, "E2EMAN1");
+        resp("pbsr_resp", b, "E2EMAN1", "ACSC");
+        tx(arrival, 2, "E2EMAN2", true);
+        member(b, 2, "E2EMAN2");
+        resp("pbsr_resp", b, "E2EMAN2", "RJCT");
+        tx(arrival, 3, "E2EMAN3", true);
+        member(b, 3, "E2EMAN3");
+        resp("pbsr_resp", b, "E2EMAN3", "ACSC");
+        assertThat(immediate.reportParent(client, "MSGMAN", "man-1")).isPresent(); // auto-ledgers all three
+
+        var manual = immediate.reportParent(client, "MSGMAN", "man-2", "OPS-7");
+
+        assertThat(manual).isPresent();
+        // guard bypassed: every tuple is already auto-ledgered yet all three re-emit;
+        // 3 rows at slice size 2 = two findCurrentForParent keyset slices
+        assertThat(Files.readAllLines(manual.get())).containsExactly(
+                "PSR|" + client + "|man-2", "TX|E2EMAN1|ACSC", "TX|E2EMAN2|RJCT",
+                "TX|E2EMAN3|ACSC", "END|3");
+        assertThat(jdbc.queryForObject("SELECT report_type FROM prg_report WHERE file_name = ?",
+                String.class, client + "_PSR_man-2.txt")).isEqualTo("MANUAL");
+        assertThat(jdbc.query("SELECT e2e, manual_ref FROM prg_delivery_ledger WHERE client = ?"
+                        + " AND manual_ref IS NOT NULL ORDER BY e2e",
+                (rs, i) -> rs.getString("e2e") + ":" + rs.getString("manual_ref"), client))
+                .containsExactly("E2EMAN1:OPS-7", "E2EMAN2:OPS-7", "E2EMAN3:OPS-7");
+        assertThat(autoLedgerRows(client)).hasSize(3); // no duplicate auto tuples minted
+    }
+
+    // --- (7) tasklet dispatch: report.type=MANUAL + parents + manual.ref ---
+
+    @Test
+    void manualJobLaunchRegeneratesLedgeredParentWithManualRef() throws Exception {
+        String client = "FNBT13";
+        cleanExchange(client, client + "_PSR_manjob0.txt", client + "_PSR_manjob1.txt");
+        seedTerminalParent(client, "MSGMJ1", "E2EMJ1");
+        assertThat(immediate.reportParent(client, "MSGMJ1", "manjob0")).isPresent(); // tuple auto-ledgered
+        JobParameters params = new JobParametersBuilder()
+                .addString("client", client, true)
+                .addString("window", "manjob1", true)
+                .addString("report.type", "MANUAL", false)
+                .addString("parents", "MSGMJ1", false)
+                .addString("manual.ref", "OPS-9", false)
+                .toJobParameters();
+
+        JobExecution execution = jobOperator.start(prgJob, params);
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(Files.readAllLines(out(client, client + "_PSR_manjob1.txt"))).containsExactly(
+                "PSR|" + client + "|manjob1", "TX|E2EMJ1|ACSC", "END|1");
+        assertThat(jdbc.queryForObject("SELECT report_type FROM prg_report WHERE file_name = ?",
+                String.class, client + "_PSR_manjob1.txt")).isEqualTo("MANUAL");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_delivery_ledger WHERE client = ?"
+                + " AND manual_ref = 'OPS-9'", Long.class, client)).isEqualTo(1L);
+    }
+
+    // --- (8) kill-resume: ledger slice committed, no file yet -> resume re-renders the ledgered line ---
+
+    @Test
+    void killedMidImmediateReportResumeDeliversPreCrashLedgeredLines() throws Exception {
+        String client = "FNBT10";
+        cleanExchange(client, client + "_PSR_immcr-1.txt");
+        UUID arrival = parent(client, "MSGCR");
+        tx(arrival, 1, "E2ECR1", true);
+        tx(arrival, 2, "E2ECR2", true);
+        UUID b = batch(group(arrival, client, "MSGCR", 1), arrival, 1, "MSGCR");
+        member(b, 1, "E2ECR1");
+        member(b, 2, "E2ECR2");
+        resp("pbsr_resp", b, "E2ECR1", "ACSC");
+        resp("pbsr_resp", b, "E2ECR2", "RJCT");
+        // post-SIGKILL state: report row + slice-1 ledger row committed (REQUIRES_NEW slices
+        // land before the file's ATOMIC_MOVE), file absent, slice-2 row still unledgered
+        UUID reportId = UUID.randomUUID();
+        jdbc.update("INSERT INTO prg_report (id, client, report_type, trigger_kind, window_key,"
+                        + " parent_source_msg_id, file_name) VALUES (?,?,?,?,?,?,?)",
+                reportId, client, "IMMEDIATE", "COMPLETE", "immcr-1", "MSGCR",
+                client + "_PSR_immcr-1.txt");
+        jdbc.update("INSERT INTO prg_delivery_ledger (report_id, client, e2e, status)"
+                + " VALUES (?,?,?,?)", reportId, client, "E2ECR1", "ACSC");
+
+        var resumed = immediate.reportParent(client, "MSGCR", "immcr-1");
+
+        assertThat(resumed).isPresent();
+        // the pre-crash ledgered E2ECR1 line MUST re-render: ledger + watermark mark it
+        // delivered, so no other path (scheduled delta, prg_report_due) will ever carry it
+        assertThat(Files.readAllLines(resumed.get())).containsExactly(
+                "PSR|" + client + "|immcr-1", "TX|E2ECR1|ACSC", "TX|E2ECR2|RJCT", "END|2");
+        assertThat(autoLedgerRows(client)).containsExactly(
+                new LedgerRow("E2ECR1", "ACSC"), new LedgerRow("E2ECR2", "RJCT"));
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_watermark WHERE client = ?",
+                Long.class, client)).isEqualTo(2L);
+    }
+
+    // --- (9) kill-resume: ALL slices ledgered, killed before the move -> resume still emits the file ---
+
+    @Test
+    void killedAfterAllSlicesLedgeredStillDeliversTheFileOnResume() throws Exception {
+        String client = "FNBT11";
+        cleanExchange(client, client + "_PSR_immca-1.txt");
+        UUID arrival = parent(client, "MSGCA");
+        tx(arrival, 1, "E2ECA1", true);
+        UUID b = batch(group(arrival, client, "MSGCA", 1), arrival, 1, "MSGCA");
+        member(b, 1, "E2ECA1");
+        resp("pbsr_resp", b, "E2ECA1", "ACSC");
+        UUID reportId = UUID.randomUUID();
+        jdbc.update("INSERT INTO prg_report (id, client, report_type, trigger_kind, window_key,"
+                        + " parent_source_msg_id, file_name) VALUES (?,?,?,?,?,?,?)",
+                reportId, client, "IMMEDIATE", "COMPLETE", "immca-1", "MSGCA",
+                client + "_PSR_immca-1.txt");
+        jdbc.update("INSERT INTO prg_delivery_ledger (report_id, client, e2e, status)"
+                + " VALUES (?,?,?,?)", reportId, client, "E2ECA1", "ACSC");
+
+        var resumed = immediate.reportParent(client, "MSGCA", "immca-1");
+
+        assertThat(resumed).isPresent();
+        assertThat(Files.readAllLines(resumed.get())).containsExactly(
+                "PSR|" + client + "|immca-1", "TX|E2ECA1|ACSC", "END|1");
+        assertThat(jdbc.queryForObject("SELECT last_status FROM prg_watermark WHERE client = ?"
+                + " AND e2e = 'E2ECA1'", String.class, client)).isEqualTo("ACSC");
     }
 
     // --- (5) negatives: unknown report.type fails the job; unknown report.id rejects the replay ---

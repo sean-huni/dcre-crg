@@ -26,7 +26,11 @@ import static org.assertj.core.api.Assertions.entry;
  * prg_report_due SQL is DEFINED by these cases):
  * (a) ext_tx_status v2 is batch-scoped: an identical e2e under a different
  *     arrival no longer cross-links a response (A-40 guard); a legacy
- *     response with emission_id NULL still projects (fail-open ingest truth).
+ *     response with emission_id NULL still projects (fail-open ingest truth)
+ *     but ONLY within its parent's identity family (orgnl_msg_id = parent
+ *     MsgId or a split child MsgId_N), so the dup-e2e x NULL-emission
+ *     collision cannot cross-link either; a resolved row beats its own
+ *     NULL-emission twin (no duplicate view rows per (arrival, sequence)).
  * (b) prg_delivery_ledger auto rows are DB-arbitrated once per
  *     (client, e2e, status); manual_ref rows bypass the guard but ledger.
  * (c) prg_report_due lists COMPLETE (all members terminal, immediately) and
@@ -108,8 +112,21 @@ class ReportingSchemaIT {
 
     /** agedSeconds null = fresh response; else updated_at is backdated past the debounce. */
     void resp(String table, UUID emissionId, String e2e, String status, Integer agedSeconds) {
+        resp(table, emissionId, "MSG", e2e, status, agedSeconds);
+    }
+
+    /**
+     * orgnl-aware variant: NULL-emission rows only project inside the parent
+     * identity family, so unresolved seeds must carry a realistic OrgnlMsgId.
+     * response_file discriminates resolved vs legacy twins of one e2e
+     * (UNIQUE (response_file, e2e)).
+     */
+    void resp(String table, UUID emissionId, String orgnlMsgId, String e2e, String status,
+              Integer agedSeconds) {
         jdbc.update("INSERT INTO " + table + " (response_file, orgnl_msg_id, e2e, status, emission_id)"
-                + " VALUES (?,?,?,?,?)", "RESP_" + table + "_" + e2e + ".xml", "MSG", e2e, status, emissionId);
+                        + " VALUES (?,?,?,?,?)",
+                "RESP_%s_%s_%s.xml".formatted(table, e2e, emissionId == null ? "legacy" : "batch"),
+                orgnlMsgId, e2e, status, emissionId);
         if (agedSeconds != null) {
             jdbc.update("UPDATE " + table + " SET updated_at = now() - INTERVAL '" + agedSeconds
                     + " seconds' WHERE e2e = ?", e2e);
@@ -161,9 +178,46 @@ class ReportingSchemaIT {
     void legacyNullEmissionResponseStillProjectsFailOpen() {
         UUID a3 = parent("FNBRF01", "MSGA3");
         tx(a3, 1, "E2ELEG");
-        resp("isr_resp", null, "E2ELEG", "ACSP", null); // reader could not resolve the batch
+        resp("isr_resp", null, "MSGA3", "E2ELEG", "ACSP", null); // reader could not resolve the batch
 
         assertThat(ext(a3, "E2ELEG").status()).isEqualTo("ACSP");
+
+        UUID a4 = parent("FNBRF01", "MSGA4"); // split child reply, registry still behind
+        tx(a4, 1, "E2ELEG2");
+        resp("isr_resp", null, "MSGA4_2", "E2ELEG2", "ACSP", null);
+
+        assertThat(ext(a4, "E2ELEG2").status()).isEqualTo("ACSP");
+    }
+
+    @Test
+    void nullEmissionResponseScopesToItsParentIdentityNotEveryDuplicateE2e() {
+        UUID a1 = parent("FNBRF04", "MSGN1");
+        tx(a1, 1, "E2ENUL");
+        UUID b1 = batch(group(a1, "FNBRF04", "MSGN1", 1), a1, 1, "MSGN1");
+        member(b1, 1, "E2ENUL");
+        UUID a2 = parent("FNBRF04", "MSGN2");
+        tx(a2, 1, "E2ENUL");
+        UUID b2 = batch(group(a2, "FNBRF04", "MSGN2", 1), a2, 1, "MSGN2");
+        member(b2, 1, "E2ENUL");
+        resp("pbsr_resp", null, "MSGN1", "E2ENUL", "ACSC", null); // unresolved reply naming parent-1
+
+        assertThat(ext(a1, "E2ENUL").status()).isEqualTo("ACSC");     // scoped to ITS parent
+        assertThat(ext(a2, "E2ENUL").status()).isEqualTo("CTV_PASS"); // dup-e2e collision closed
+        assertThat(ext(a2, "E2ENUL").terminal()).isFalse();
+    }
+
+    @Test
+    void resolvedResponsePrevailsOverItsNullEmissionTwinWithoutRowDuplication() {
+        UUID a = parent("FNBRF05", "MSGT1");
+        tx(a, 1, "E2ETWIN");
+        UUID b = batch(group(a, "FNBRF05", "MSGT1", 1), a, 1, "MSGT1");
+        member(b, 1, "E2ETWIN");
+        resp("isr_resp", b, "MSGT1", "E2ETWIN", "ACSC", null);    // resolved, batch-scoped
+        resp("isr_resp", null, "MSGT1", "E2ETWIN", "ACSP", null); // legacy twin, same identity family
+
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM ext_tx_status WHERE arrival_id = ?"
+                + " AND e2e = 'E2ETWIN'", Long.class, a)).isEqualTo(1L); // no double TX/ledger tuples
+        assertThat(ext(a, "E2ETWIN").status()).isEqualTo("ACSC");
     }
 
     // --- (b) ledger auto-guard + manual bypass ---

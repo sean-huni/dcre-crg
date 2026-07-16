@@ -37,12 +37,15 @@ import java.util.UUID;
  * in-step reads would never observe the slice commits and the ledger-drop-out
  * pagination of {@code findUnreportedForParent} would loop forever.
  *
- * <p>Crash windows: ledger rows commit before the file's atomic move, so a
- * kill mid-stream can leave ledgered lines with no visible file; that is the
- * documented recovery case for {@link #replay(UUID)} (spec: recovery of a
- * lost/corrupt file). Immediate and manual reports DO advance the watermark
- * (the scheduled delta must not repeat their lines); replay never touches it
- * (historical statuses must not regress last_status).
+ * <p>Crash windows: ledger slices commit before the file's atomic move, so a
+ * kill mid-stream leaves ledgered lines with no visible file. A restart of
+ * the SAME window seeds the render from the report's own ledger rows before
+ * appending the unledgered remainder (resume-same-logical-work): without the
+ * seed those lines are marked delivered everywhere (ledger, watermark,
+ * prg_report_due all exclude them) yet never reach any file. Immediate and
+ * manual reports DO advance the watermark (the scheduled delta must not
+ * repeat their lines); replay never touches it (historical statuses must not
+ * regress last_status).
  *
  * <p>Deliberate 5-dependency aggregator: this service owns the whole report
  * flow (read, registry, ledger, layout, transactions).
@@ -84,7 +87,7 @@ public class ImmediateReportService {
         final Path target = outDir(client).resolve(client + "_PSR_" + windowKey + ".txt");
         final List<StatusRow> probe = freshTx.execute(s -> read(client, sourceMsgId, manualRef, ""));
         if (probe == null || probe.isEmpty()) {
-            return replayedAdvanceIfEmissionStands(client, target);
+            return recoverStanding(client, sourceMsgId, manualRef, target);
         }
         final PrgReportEntity report = openReport(client, sourceMsgId, windowKey, manualRef, target);
         stream(report, client, sourceMsgId, manualRef, target);
@@ -118,12 +121,22 @@ public class ImmediateReportService {
         return target;
     }
 
-    /** No delta AND a standing emission for this window = the crash-window restart: finish the advance. */
-    private Optional<Path> replayedAdvanceIfEmissionStands(final String client, final Path target) {
+    /**
+     * No unreported delta, but a report row for this window may stand: the
+     * kill-resume window. File present = killed between the ATOMIC_MOVE and
+     * the advance: finish the advance. File absent with ledgered rows =
+     * killed between a ledger slice commit and the move: re-render the file
+     * from the ledger, then advance. No standing row, or a standing row with
+     * nothing ledgered yet, is a plain no-op (nothing was lost).
+     */
+    private Optional<Path> recoverStanding(final String client, final String sourceMsgId,
+                                           final String manualRef, final Path target) throws IOException {
         final Optional<PrgReportEntity> standing = reports.findByFileName(target.getFileName().toString());
-        if (standing.isEmpty() || !Files.exists(target)) {
+        if (standing.isEmpty()
+                || (!Files.exists(target) && ledger.countForReport(standing.get().getId()) == 0)) {
             return Optional.empty();
         }
+        stream(standing.get(), client, sourceMsgId, manualRef, target); // existing file = stream no-op
         advanceWatermarks(client, standing.get().getId());
         return Optional.of(target);
     }
@@ -148,7 +161,7 @@ public class ImmediateReportService {
         }
         try (StreamedPsrWrite psr = StreamedPsrWrite.begin(target,
                 "PSR|" + client + "|" + report.getWindowKey())) {
-            String after = "";
+            String after = seedLedgered(psr, report.getId());
             while (true) {
                 final String resume = after;
                 final List<StatusRow> slice = CrdbRetry.get(
@@ -168,6 +181,21 @@ public class ImmediateReportService {
                     report.getReportType(), client, sourceMsgId, report.getWindowKey(),
                     psr.count(), target.getFileName());
         }
+    }
+
+    /**
+     * Kill-resume seed: lines a PRIOR crashed attempt of THIS report already
+     * ledgered (slice txs commit before the ATOMIC_MOVE) render first, or
+     * they would never reach any file. A fresh report has zero rows (no-op);
+     * returning the last seeded e2e resumes the MANUAL keyset without minting
+     * duplicate manual_ref rows.
+     */
+    private String seedLedgered(final StreamedPsrWrite psr, final UUID reportId) throws IOException {
+        final List<LedgerRow> recovered = ledger.rowsForReport(reportId);
+        for (final LedgerRow row : recovered) {
+            psr.writeTx("TX|" + row.e2e() + "|" + row.status());
+        }
+        return recovered.isEmpty() ? "" : recovered.getLast().e2e();
     }
 
     /** One slice: read (auto = ledger drop-out pagination, manual = keyset) + ledger in the SAME fresh tx. */
