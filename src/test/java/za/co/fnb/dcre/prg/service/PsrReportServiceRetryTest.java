@@ -9,6 +9,8 @@ import za.co.fnb.dcre.platform.files.ExchangeChannel;
 import za.co.fnb.dcre.platform.files.ExchangeLayout;
 import za.co.fnb.dcre.platform.files.ExchangeSub;
 import za.co.fnb.dcre.prg.data.model.StatusRow;
+import za.co.fnb.dcre.prg.data.repo.PrgDeliveryLedgerRepo;
+import za.co.fnb.dcre.prg.data.repo.PrgReportRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
 
 import java.nio.file.Files;
@@ -20,6 +22,8 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -52,9 +56,15 @@ class PsrReportServiceRetryTest {
     @BeforeEach
     void setUp() {
         watermarks = mock(PrgWatermarkRepo.class);
+        // SCRUM-55 registry/ledger collaborators: benign mocks; the retry contract under test is unchanged.
+        PrgReportRepo reports = mock(PrgReportRepo.class);
+        when(reports.findByFileName(anyString())).thenReturn(Optional.empty());
+        when(reports.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        PrgDeliveryLedgerRepo ledger = mock(PrgDeliveryLedgerRepo.class);
         ExchangeLayout layout = new ExchangeLayout(root, Map.of(CLIENT,
                 Map.of(ExchangeChannel.ONHOST_RESP, Map.of(ExchangeSub.OUT, "fnbrf01/onhost-resp/out"))));
-        service = new PsrReportService(watermarks, layout, new ResourcelessTransactionManager(), SLICE_SIZE);
+        service = new PsrReportService(watermarks, reports, ledger, layout,
+                new ResourcelessTransactionManager(), SLICE_SIZE);
         when(watermarks.countUnknown(CLIENT)).thenReturn(0L);
         // SCRUM-42 sliced reads: the stream phase AND the R-29 advance phase each
         // read the first (and only) keyset slice.

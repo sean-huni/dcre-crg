@@ -10,8 +10,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import za.co.fnb.dcre.platform.files.ExchangeChannel;
 import za.co.fnb.dcre.platform.files.ExchangeLayout;
 import za.co.fnb.dcre.platform.files.ExchangeSub;
+import za.co.fnb.dcre.prg.data.model.PrgReportEntity;
 import za.co.fnb.dcre.prg.data.model.StatusRow;
 import za.co.fnb.dcre.prg.data.model.UnknownRow;
+import za.co.fnb.dcre.prg.data.repo.PrgDeliveryLedgerRepo;
+import za.co.fnb.dcre.prg.data.repo.PrgReportRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
 
 import java.io.IOException;
@@ -19,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Business tier: per-client delta PSR emission on clock windows.
@@ -38,6 +42,14 @@ import java.util.Optional;
  * watermark advance from a fresh delta read: the existing restart semantics,
  * which the advance phase now uses on EVERY run (it re-reads the same keyset
  * slices rather than holding the streamed rows).
+ *
+ * <p>SCRUM-55: every scheduled emission registers a prg_report row (restart
+ * reuses it, file_name is unique) and the advance phase ledgers each advanced
+ * line in the same per-slice transaction as its watermark: the delivery
+ * ledger is the authority on what was externally reported. Lines an
+ * IMMEDIATE report already ledgered never reach a scheduled delta (immediate
+ * reports advance the watermark), so the ON CONFLICT no-op is only the
+ * resend/replay path.
  */
 @Service
 public class PsrReportService {
@@ -48,14 +60,19 @@ public class PsrReportService {
     private static final Logger log = LoggerFactory.getLogger(PsrReportService.class);
 
     private final PrgWatermarkRepo watermarks;
+    private final PrgReportRepo reports;
+    private final PrgDeliveryLedgerRepo ledger;
     private final ExchangeLayout layout;
     private final TransactionTemplate watermarkTx;
     private final int sliceSize;
 
-    public PsrReportService(final PrgWatermarkRepo watermarks, final ExchangeLayout layout,
+    public PsrReportService(final PrgWatermarkRepo watermarks, final PrgReportRepo reports,
+                            final PrgDeliveryLedgerRepo ledger, final ExchangeLayout layout,
                             final PlatformTransactionManager txManager,
                             @Value("${dcre.prg.psr-slice-size:50000}") final int sliceSize) {
         this.watermarks = watermarks;
+        this.reports = reports;
+        this.ledger = ledger;
         this.layout = layout;
         // Each watermark-advance attempt needs its OWN transaction: a CRDB
         // 40001 abort poisons the surrounding transaction (25P02 on any further
@@ -82,8 +99,17 @@ public class PsrReportService {
         }
         // R-29: the whole file is visible by now, so replaying the advance is safe
         // (upsert keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
-        advanceWatermarks(client, resend);
+        advanceWatermarks(client, resend, openReport(client, windowKey, target));
         return Optional.of(target);
+    }
+
+    /** SCRUM-55 report registry: find-or-save on the unique file_name so restarts reuse the row. */
+    private UUID openReport(final String client, final String windowKey, final Path target) {
+        final String fileName = target.getFileName().toString();
+        return watermarkTx.execute(s -> reports.findByFileName(fileName)
+                .orElseGet(() -> reports.save(PrgReportEntity.of(
+                        client, "SCHEDULED", "CLOCK", windowKey, null, fileName)))
+                .getId());
     }
 
     /**
@@ -130,14 +156,14 @@ public class PsrReportService {
      * Advanced delta rows drop out of later slices; the keyset resume keeps
      * both delta and resend reads bounded and forward-only.
      */
-    private void advanceWatermarks(final String client, final boolean resend) {
+    private void advanceWatermarks(final String client, final boolean resend, final UUID reportId) {
         String after = "";
         while (true) {
             final List<StatusRow> slice = readSlice(client, resend, after);
             if (slice.isEmpty()) {
                 return;
             }
-            advanceSlice(client, slice);
+            advanceSlice(client, reportId, slice);
             if (slice.size() < sliceSize) {
                 return;
             }
@@ -145,10 +171,12 @@ public class PsrReportService {
         }
     }
 
-    private void advanceSlice(final String client, final List<StatusRow> slice) {
+    /** Ledger + watermark per advanced line, atomically per slice (the ledger is the delivery authority). */
+    private void advanceSlice(final String client, final UUID reportId, final List<StatusRow> slice) {
         CrdbRetry.run("watermark-advance client=%s from=%s".formatted(client, slice.getFirst().e2e()),
                 () -> watermarkTx.executeWithoutResult(status -> {
                     for (final StatusRow row : slice) {
+                        ledger.record(reportId, client, row.e2e(), row.status(), null);
                         watermarks.upsertWatermark(client, row.e2e(), row.status());
                     }
                 }));
