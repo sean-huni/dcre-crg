@@ -135,11 +135,17 @@ class PrgJobTest {
         assertEquals(4, jdbc.queryForObject(
                 "SELECT count(*) FROM prg_watermark WHERE client=?", Integer.class, client));
 
-        // (b) w2: nothing moved, NO file (delta proof).
+        // (b) w2: nothing moved -> zero-valued heartbeat PSR (SCRUM-55), watermark untouched.
         JobExecution w2 = jobOperator.start(prgJob, window(client, "w2", false));
         assertEquals(BatchStatus.COMPLETED, w2.getStatus());
-        assertFalse(Files.exists(dir.resolve(client + "_PSR_w2.txt")),
-                "an unchanged window emits no PSR file");
+        assertEquals(List.of("PSR|" + client + "|w2",
+                        "HB|DCRE00000000000000000000000000000|DCRE00000000000000000000000000000|0|0.00",
+                        "PD|0", "END|0"),
+                Files.readAllLines(dir.resolve(client + "_PSR_w2.txt")),
+                "an unchanged window emits the zero-valued heartbeat PSR");
+        assertEquals(4, jdbc.queryForObject(
+                "SELECT count(*) FROM prg_watermark WHERE client=?", Integer.class, client),
+                "the heartbeat never advances the watermark");
 
         // (c) w3: one status flips, the file carries exactly that one row.
         jdbc.update("UPDATE pbsr_resp SET status='RJCT', reason='MS03' WHERE e2e='E2EPRG1'");

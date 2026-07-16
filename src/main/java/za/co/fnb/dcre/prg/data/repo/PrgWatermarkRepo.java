@@ -93,6 +93,14 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
             @Param("sourceMsgId") String sourceMsgId, @Param("afterE2e") String afterE2e,
             @Param("limit") int limit);
 
+    /**
+     * SCRUM-55 heartbeat PD line: the client's still-pending rows from
+     * prg_sla_pending (members of VISIBLE batches whose current status is
+     * non-terminal). Zero pending prints PD|0.
+     */
+    @Query("SELECT count(*) FROM prg_sla_pending WHERE client = :client")
+    long countSlaPending(@Param("client") String client);
+
     /** COMPLETE or IDLE from the due view: the trigger_kind stamped on an immediate prg_report row. */
     @Query("SELECT reason FROM prg_report_due WHERE client = :client AND source_msg_id = :sourceMsgId LIMIT 1")
     Optional<String> dueReason(@Param("client") String client, @Param("sourceMsgId") String sourceMsgId);

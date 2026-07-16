@@ -171,7 +171,13 @@ class PsrReportServiceSliceTest {
 
         Optional<Path> emitted = service.window(client, "s1", false);
 
-        assertTrue(emitted.isEmpty(), "unknown-only book carries no reportable delta");
+        // SCRUM-55: an unknown-only book carries no reportable delta -> the zero-valued heartbeat
+        assertTrue(emitted.isPresent(), "a zero-delta window emits the heartbeat PSR");
+        assertEquals("END|0", Files.readAllLines(emitted.get()).getLast(),
+                "the heartbeat carries no TX lines");
+        assertEquals(0, jdbc.queryForObject(
+                "SELECT count(*) FROM prg_watermark WHERE client=?", Integer.class, client),
+                "the heartbeat never advances the watermark");
         assertEquals(List.of("excluded stage=PRG client=" + client + " count=101 reason=STATUS_UNKNOWN"),
                 exclusionWarns(), "101 unknowns collapse to ONE summary WARN, no per-row flood");
     }

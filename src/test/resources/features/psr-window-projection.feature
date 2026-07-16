@@ -4,7 +4,9 @@ Feature: PRG delta PSR projection per clock window
   PRG projects one payment status report (PSR) per client per clock window.
   Only rows whose status moved past the client's watermark are emitted (R-29);
   the deepest response leg wins per row (R-17: PBSR > SBSR > ISR > CTV_PASS).
-  A window with no movement produces no file; a resend re-projects everything.
+  A window with no movement emits a zero-valued heartbeat PSR (SCRUM-55) so
+  the consumer can tell "no movement" from "PRG dead"; a resend re-projects
+  everything.
 
   Background:
     Given a PRG client with a new arrival
@@ -21,13 +23,14 @@ Feature: PRG delta PSR projection per clock window
       | T2          | ACSP     |
       | T3          | CTV_PASS |
 
-  Scenario: An unchanged window emits no PSR file
+  Scenario: An unchanged window emits a zero-valued heartbeat PSR
     Given transaction "T1" has SBSR status "ACSP" and PBSR status "ACSC"
     And transaction "T2" has only a CTV PASS verdict
     And the PRG window "w1" has already emitted
     When the PRG window "w2" runs
     Then the PRG job completes
-    And no PSR file is emitted for window "w2"
+    And the PSR file for window "w2" is a zero-valued heartbeat
+    And the client watermark is unchanged by the heartbeat
 
   Scenario: A single status flip projects exactly that row in the next window
     Given transaction "T1" has SBSR status "ACSP" and PBSR status "ACSC"

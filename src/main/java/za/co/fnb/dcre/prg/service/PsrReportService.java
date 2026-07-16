@@ -28,7 +28,8 @@ import java.util.UUID;
  * Business tier: per-client delta PSR emission on clock windows.
  * PSR flat file layout is a SYNTHETIC-CONTRACT (R-35): header
  * "PSR|client|window", one "TX|e2e|status" per row, trailer "END|count".
- * Zero delta rows = NO file for the window; resend re-emits ALL current rows.
+ * Zero delta rows = a zero-valued HEARTBEAT file (SCRUM-55, below); resend
+ * re-emits ALL current rows.
  *
  * <p>SCRUM-42 load fix: whole-book reads plus a full in-heap render blew
  * CRDB's sql memory budget (2116569420 bytes on the 30M-tx book) and the JVM.
@@ -50,12 +51,22 @@ import java.util.UUID;
  * IMMEDIATE report already ledgered never reach a scheduled delta (immediate
  * reports advance the watermark), so the ON CONFLICT no-op is only the
  * resend/replay path.
+ *
+ * <p>SCRUM-55 heartbeat: a quiet SCHEDULED window (zero delta) emits a
+ * zero-valued normal-format PSR so the consumer can tell "no movement" from
+ * "PRG dead". Only this class (the SCHEDULED path) heartbeats; the
+ * immediate/manual paths stay file-less no-ops. The HB placeholder is a
+ * SYNTHETIC-CONTRACT (register A-item): the real legacy response copybook
+ * and its exact zero-placeholder bytes are unrecovered.
  */
 @Service
 public class PsrReportService {
 
     /** Above this, unknown-status exclusions collapse to ONE summary WARN (R-38 at scale, CRW's hybrid). */
     static final int UNKNOWN_DETAIL_WARN_LIMIT = 100;
+
+    /** Heartbeat zero placeholder, DCRE + 29 zeros = 33 chars (Max35-safe). SYNTHETIC-CONTRACT (A-57). */
+    static final String HB_PLACEHOLDER = "DCRE" + "0".repeat(29);
 
     private static final Logger log = LoggerFactory.getLogger(PsrReportService.class);
 
@@ -82,16 +93,16 @@ public class PsrReportService {
         this.sliceSize = sliceSize;
     }
 
-    /** @return the emitted PSR file path, or empty when the window carries no delta. */
+    /** @return the emitted PSR file path: the windowed delta, or the zero-valued heartbeat on zero delta. */
     public Optional<Path> window(final String client, final String windowKey, final boolean resend)
             throws IOException {
         warnUnknown(client);
         final List<StatusRow> first = readSlice(client, resend, "");
-        if (first.isEmpty()) {
-            return Optional.empty();
-        }
         final Path target = layout.resolve(client, ExchangeChannel.ONHOST_RESP, ExchangeSub.OUT)
                 .resolve(client + "_PSR_" + windowKey + ".txt");
+        if (first.isEmpty()) {
+            return Optional.of(heartbeat(client, windowKey, target));
+        }
         if (!Files.exists(target)) {
             // R-24 restart no-op contract: an existing target means a prior
             // emission stands; only a fresh window streams a new file.
@@ -99,16 +110,42 @@ public class PsrReportService {
         }
         // R-29: the whole file is visible by now, so replaying the advance is safe
         // (upsert keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
-        advanceWatermarks(client, resend, openReport(client, windowKey, target));
+        advanceWatermarks(client, resend, openReport(client, "SCHEDULED", windowKey, target));
         return Optional.of(target);
     }
 
+    /**
+     * SCRUM-55 heartbeat: zero-valued normal-format PSR for a quiet window.
+     * HB carries the SYNTHETIC-CONTRACT zero placeholders, PD the client's
+     * prg_sla_pending count; neither is a TX line, so the trailer stays
+     * END|0. Registry row type HEARTBEAT; the watermark and the delivery
+     * ledger are NEVER touched (nothing was externally reported). A crash
+     * between the move and the registry insert replays as skip-existing-file
+     * + find-or-save.
+     */
+    private Path heartbeat(final String client, final String windowKey, final Path target)
+            throws IOException {
+        if (!Files.exists(target)) { // R-24: a standing emission is never rewritten
+            try (StreamedPsrWrite psr = StreamedPsrWrite.begin(target,
+                    "PSR|%s|%s".formatted(client, windowKey))) {
+                psr.writeInfo("HB|%s|%s|0|0.00".formatted(HB_PLACEHOLDER, HB_PLACEHOLDER));
+                psr.writeInfo("PD|%d".formatted(watermarks.countSlaPending(client)));
+                psr.commit();
+            }
+        }
+        openReport(client, "HEARTBEAT", windowKey, target);
+        log.info("report stage=PRG type=HEARTBEAT client={} window={} file={}",
+                client, windowKey, target.getFileName());
+        return target;
+    }
+
     /** SCRUM-55 report registry: find-or-save on the unique file_name so restarts reuse the row. */
-    private UUID openReport(final String client, final String windowKey, final Path target) {
+    private UUID openReport(final String client, final String reportType, final String windowKey,
+                            final Path target) {
         final String fileName = target.getFileName().toString();
         return watermarkTx.execute(s -> reports.findByFileName(fileName)
                 .orElseGet(() -> reports.save(PrgReportEntity.of(
-                        client, "SCHEDULED", "CLOCK", windowKey, null, fileName)))
+                        client, reportType, "CLOCK", windowKey, null, fileName)))
                 .getId());
     }
 

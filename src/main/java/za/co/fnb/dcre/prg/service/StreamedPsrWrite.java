@@ -52,6 +52,11 @@ final class StreamedPsrWrite implements Closeable {
         count++;
     }
 
+    /** Non-TX body line (heartbeat HB/PD): written verbatim, never counted in the END trailer. */
+    void writeInfo(final String infoLine) throws IOException {
+        line(infoLine);
+    }
+
     long count() {
         return count;
     }
