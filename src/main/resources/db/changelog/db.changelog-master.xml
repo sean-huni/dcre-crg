@@ -7,5 +7,6 @@
 
     <include file="db/changelog/2026/07/001-prg.xml"/>
     <include file="db/changelog/2026/07/002-batch-metadata.xml"/>
+    <include file="db/changelog/2026/07/003-reporting.xml"/>
 
 </databaseChangeLog>
