@@ -3,6 +3,9 @@ package za.co.fnb.dcre.prg.service;
 import java.io.BufferedWriter;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SeekableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -45,6 +48,27 @@ final class StreamedPsrWrite implements Closeable {
             throw e;
         }
         return write;
+    }
+
+    /**
+     * Reads a standing PSR's trailer line via a bounded tail read (never the
+     * whole file: delta PSRs reach tens of millions of lines). The trailer is
+     * "END|" + count, so 64 bytes always cover it plus the final newline.
+     * SCRUM-55 kill-resume classifier: END|0 identifies a heartbeat file even
+     * when its registry row is missing (a real delta file counts >= 1 TX line).
+     */
+    static String trailer(final Path target) throws IOException {
+        try (SeekableByteChannel channel = Files.newByteChannel(target)) {
+            final int tail = (int) Math.min(64, channel.size());
+            channel.position(channel.size() - tail);
+            final ByteBuffer buf = ByteBuffer.allocate(tail);
+            while (buf.hasRemaining() && channel.read(buf) >= 0) {
+                // bounded: at most `tail` bytes
+            }
+            final String[] lines = new String(buf.array(), 0, buf.position(), StandardCharsets.UTF_8)
+                    .strip().split("\\R");
+            return lines[lines.length - 1];
+        }
     }
 
     void writeTx(final String txLine) throws IOException {

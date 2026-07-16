@@ -29,7 +29,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (2) PD counts the client's prg_sla_pending rows (VISIBLE batch members
  *     with a non-terminal status); an all-quiet book prints PD|0;
  * (3) a window WITH delta emits the normal file (TX lines, no HB/PD) with
- *     report_type SCHEDULED: the heartbeat never replaces a real report.
+ *     report_type SCHEDULED: the heartbeat never replaces a real report;
+ * (4) kill-resume (review blocker prg-11): a same-window replay that finds a
+ *     standing heartbeat but a late delta defers the delta to the next
+ *     window; it never ledgers/advances against the zero-TX file, with the
+ *     trailer END|0 classifying a registry-less heartbeat file.
  * Clients come from the FNBT isolation pool + FNBCC01 (one per test: report
  * file names and watermark rows are client-global).
  */
@@ -199,5 +203,70 @@ class HeartbeatIT {
         assertThat(Files.readAllLines(path.get())).containsExactly(
                 "PSR|" + client + "|hbdl-1", "TX|E2EHBDL1|CTV_PASS", "END|1");
         assertThat(reportType(client + "_PSR_hbdl-1.txt")).isEqualTo("SCHEDULED");
+    }
+
+    // --- (4) kill-resume regression (review blocker prg-11): a standing heartbeat must never
+    // absorb a delta that arrived between the kill and the same-window relaunch. Pre-fix the
+    // replay skipped streamPsr (file exists) but still ledgered + watermark-advanced every
+    // delta row against the HEARTBEAT report row: statuses never present in ANY emitted file
+    // were recorded as externally delivered and permanently suppressed. ---
+
+    @Test
+    void sameWindowReplayAfterHeartbeatDefersTheLateDeltaToTheNextWindow() throws Exception {
+        String client = "FNBT06";
+        cleanExchange(client, client + "_PSR_hbkr-1.txt", client + "_PSR_hbkr-2.txt");
+
+        // quiet window: the heartbeat stands
+        var hb = service.window(client, "hbkr-1", false);
+        assertThat(hb).isPresent();
+        assertThat(Files.readAllLines(hb.get())).containsExactly(
+                "PSR|" + client + "|hbkr-1", HB_LINE, "PD|0", "END|0");
+
+        // a response arrives between the mid-window kill and the OrphanSweeper relaunch
+        UUID arrival = parent(client, "MSGHBKR");
+        tx(arrival, 1, "E2EHBKR1");
+
+        // relaunch of the SAME (client, window) identity: heartbeat file untouched,
+        // NOTHING ledgered or watermark-advanced (the terminal status must still reach
+        // the client via the next window)
+        var replay = service.window(client, "hbkr-1", false);
+        assertThat(replay).contains(hb.get());
+        assertThat(Files.readAllLines(hb.get())).containsExactly(
+                "PSR|" + client + "|hbkr-1", HB_LINE, "PD|0", "END|0");
+        assertThat(ledgerCount(client)).isZero();
+        assertThat(watermarkCount(client)).isZero();
+        assertThat(reportType(client + "_PSR_hbkr-1.txt")).isEqualTo("HEARTBEAT");
+
+        // the deferred delta flows to the NEXT window as a normal scheduled report
+        var next = service.window(client, "hbkr-2", false);
+        assertThat(next).isPresent();
+        assertThat(Files.readAllLines(next.get())).containsExactly(
+                "PSR|" + client + "|hbkr-2", "TX|E2EHBKR1|CTV_PASS", "END|1");
+        assertThat(reportType(client + "_PSR_hbkr-2.txt")).isEqualTo("SCHEDULED");
+        assertThat(ledgerCount(client)).isEqualTo(1L);
+        assertThat(watermarkCount(client)).isEqualTo(1L);
+    }
+
+    @Test
+    void heartbeatFileWithoutRegistryRowStillDefersTheDeltaByItsTrailer() throws Exception {
+        // crash in the narrow window between the heartbeat ATOMIC_MOVE and the registry
+        // insert: the END|0 file stands with NO prg_report row. The replay must classify
+        // it by its trailer (a real delta file always counts at least one TX line),
+        // converge the registry to HEARTBEAT, and still defer the delta.
+        String client = "FNBT07";
+        cleanExchange(client, client + "_PSR_hbnr-1.txt");
+
+        var hb = service.window(client, "hbnr-1", false);
+        assertThat(hb).isPresent();
+        jdbc.update("DELETE FROM prg_report WHERE file_name = ?", client + "_PSR_hbnr-1.txt");
+
+        UUID arrival = parent(client, "MSGHBNR");
+        tx(arrival, 1, "E2EHBNR1");
+
+        var replay = service.window(client, "hbnr-1", false);
+        assertThat(replay).contains(hb.get());
+        assertThat(ledgerCount(client)).isZero();
+        assertThat(watermarkCount(client)).isZero();
+        assertThat(reportType(client + "_PSR_hbnr-1.txt")).isEqualTo("HEARTBEAT");
     }
 }

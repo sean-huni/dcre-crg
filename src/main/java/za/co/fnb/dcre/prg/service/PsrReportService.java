@@ -57,7 +57,10 @@ import java.util.UUID;
  * "PRG dead". Only this class (the SCHEDULED path) heartbeats; the
  * immediate/manual paths stay file-less no-ops. The HB placeholder is a
  * SYNTHETIC-CONTRACT (register A-item): the real legacy response copybook
- * and its exact zero-placeholder bytes are unrecovered.
+ * and its exact zero-placeholder bytes are unrecovered. A same-window replay
+ * that finds a standing heartbeat but a late delta (kill-resume) defers the
+ * delta to the NEXT window: it is never ledgered or watermark-advanced
+ * against a file that carries no TX lines.
  */
 @Service
 public class PsrReportService {
@@ -103,6 +106,16 @@ public class PsrReportService {
         if (first.isEmpty()) {
             return Optional.of(heartbeat(client, windowKey, target));
         }
+        if (heartbeatStands(target)) {
+            // SCRUM-55 kill-resume guard (review prg-11): a heartbeat already stands
+            // for this window (R-24: never rewritten). Ledgering/advancing the late
+            // delta against a zero-TX file would record lines as externally delivered
+            // that never reached the client (permanently suppressing e.g. a terminal
+            // RJCT); the delta flows untouched to the NEXT window instead.
+            log.info("report stage=PRG type=SCHEDULED client={} window={} reason=HEARTBEAT_STANDS"
+                    + " action=defer-delta", client, windowKey);
+            return Optional.of(heartbeat(client, windowKey, target));
+        }
         if (!Files.exists(target)) {
             // R-24 restart no-op contract: an existing target means a prior
             // emission stands; only a fresh window streams a new file.
@@ -112,6 +125,22 @@ public class PsrReportService {
         // (upsert keyed (client, e2e)); WriteTooOldError under load is a routine 40001.
         advanceWatermarks(client, resend, openReport(client, "SCHEDULED", windowKey, target));
         return Optional.of(target);
+    }
+
+    /**
+     * SCRUM-55 kill-resume guard: true when this window's standing artifact
+     * is a heartbeat: registry row type HEARTBEAT, or (crash in the gap
+     * between the heartbeat ATOMIC_MOVE and the registry insert) a standing
+     * file whose trailer is END|0. A real delta file always counts at least
+     * one TX line, so END|0 uniquely classifies a heartbeat; the trailer
+     * check is a bounded tail read and only runs when no registry row exists.
+     */
+    private boolean heartbeatStands(final Path target) throws IOException {
+        final var standing = reports.findByFileName(target.getFileName().toString());
+        if (standing.isPresent()) {
+            return "HEARTBEAT".equals(standing.get().getReportType());
+        }
+        return Files.exists(target) && "END|0".equals(StreamedPsrWrite.trailer(target));
     }
 
     /**
