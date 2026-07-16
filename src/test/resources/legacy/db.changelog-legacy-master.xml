@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- FROZEN LEGACY MASTER (testing.md legacy-state rule): reproduces the full
+     pre-97bcebf changelog end state. 001/002 are included by their PRODUCTION
+     classpath paths (unchanged since 97bcebf~1, so identity and checksums match
+     the current master); 003 is the frozen v2 fixture whose logicalFilePath pins
+     it to the production 003 path. NEVER edit. -->
 <databaseChangeLog
         xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -7,6 +12,6 @@
 
     <include file="db/changelog/2026/07/001-prg.xml"/>
     <include file="db/changelog/2026/07/002-batch-metadata.xml"/>
-    <include file="db/changelog/2026/07/003-reporting.xml"/>
+    <include file="legacy/003-reporting-v2.xml"/>
 
 </databaseChangeLog>

@@ -9,6 +9,7 @@ import za.co.fnb.dcre.prg.data.model.StatusRow;
 import za.co.fnb.dcre.prg.data.model.UnknownRow;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUID> {
@@ -60,6 +61,49 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
             ORDER BY x.arrival_id, x.sequence
             LIMIT :limit""", rowMapperClass = UnknownRowMapper.class)
     List<UnknownRow> findUnknownDetail(@Param("client") String client, @Param("limit") int limit);
+
+    /**
+     * SCRUM-55 parent-scoped delta for IMMEDIATE reports: every current status
+     * of the parent's rows not yet auto-ledgered. Deliberately ledger-guarded
+     * (not watermark-guarded): the delivery ledger is the authority on what
+     * was externally reported, and re-reading after each ledgered slice makes
+     * reported rows drop out, which is also the pagination (no keyset needed).
+     */
+    @Query(value = """
+            SELECT x.e2e, x.status FROM ext_tx_status x
+            WHERE x.client = :client AND x.source_msg_id = :sourceMsgId AND x.status IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM prg_delivery_ledger l
+                              WHERE l.client = x.client AND l.e2e = x.e2e AND l.status = x.status
+                                AND l.manual_ref IS NULL)
+            ORDER BY x.e2e LIMIT :limit""", rowMapperClass = StatusRowMapper.class)
+    List<StatusRow> findUnreportedForParent(@Param("client") String client,
+            @Param("sourceMsgId") String sourceMsgId, @Param("limit") int limit);
+
+    /**
+     * SCRUM-55 MANUAL regenerate-from-current-status: ALL current statuses of
+     * the parent, ledger ignored (the manual override bypasses the auto
+     * guard). Keyset pagination: manual ledger rows never drop out of reads.
+     */
+    @Query(value = """
+            SELECT x.e2e, x.status FROM ext_tx_status x
+            WHERE x.client = :client AND x.source_msg_id = :sourceMsgId AND x.status IS NOT NULL
+              AND x.e2e > :afterE2e
+            ORDER BY x.e2e LIMIT :limit""", rowMapperClass = StatusRowMapper.class)
+    List<StatusRow> findCurrentForParent(@Param("client") String client,
+            @Param("sourceMsgId") String sourceMsgId, @Param("afterE2e") String afterE2e,
+            @Param("limit") int limit);
+
+    /**
+     * SCRUM-55 heartbeat PD line: the client's still-pending rows from
+     * prg_sla_pending (members of VISIBLE batches whose current status is
+     * non-terminal). Zero pending prints PD|0.
+     */
+    @Query("SELECT count(*) FROM prg_sla_pending WHERE client = :client")
+    long countSlaPending(@Param("client") String client);
+
+    /** COMPLETE or IDLE from the due view: the trigger_kind stamped on an immediate prg_report row. */
+    @Query("SELECT reason FROM prg_report_due WHERE client = :client AND source_msg_id = :sourceMsgId LIMIT 1")
+    Optional<String> dueReason(@Param("client") String client, @Param("sourceMsgId") String sourceMsgId);
 
     /** NEVER UPSERT INTO: CRDB resolves UPSERT on PK only; business identity is (client, e2e). */
     @Modifying

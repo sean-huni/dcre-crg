@@ -57,6 +57,7 @@ public class PrgSteps {
     private final Map<String, Integer> seqByLabel = new HashMap<>();
     private JobExecution lastRun;
     private ListAppender<ILoggingEvent> warns;
+    private Map<String, String> watermarkSnapshot;
 
     @Before
     public void attachWarnAppender() {
@@ -111,6 +112,7 @@ public class PrgSteps {
         runWindow(window, false);
         assertEquals(BatchStatus.COMPLETED, lastRun.getStatus());
         assertTrue(Files.exists(psrFile(window)), "expected the prior window's PSR file");
+        watermarkSnapshot = readWatermarks();
     }
 
     @When("the PRG window {string} runs")
@@ -144,9 +146,22 @@ public class PrgSteps {
         assertEquals(expectedTx, lines.stream().filter(l -> l.startsWith("TX|")).toList());
     }
 
-    @Then("no PSR file is emitted for window {string}")
-    public void noPsrFileEmitted(String window) {
-        assertFalse(Files.exists(psrFile(window)), "an unchanged window must emit no PSR file");
+    /** SCRUM-55: a quiet window emits the exact zero-valued heartbeat (HB placeholder = DCRE + 29 zeros). */
+    @Then("the PSR file for window {string} is a zero-valued heartbeat")
+    public void psrFileIsZeroValuedHeartbeat(String window) throws Exception {
+        assertEquals(List.of("PSR|" + client + "|" + window,
+                "HB|DCRE00000000000000000000000000000|DCRE00000000000000000000000000000|0|0.00",
+                "PD|0", "END|0"), Files.readAllLines(psrFile(window)),
+                "an unchanged window emits the zero-valued heartbeat PSR");
+        assertEquals("HEARTBEAT", jdbc.queryForObject(
+                "SELECT report_type FROM prg_report WHERE file_name=?", String.class,
+                psrFile(window).getFileName().toString()), "heartbeat registry row");
+    }
+
+    @Then("the client watermark is unchanged by the heartbeat")
+    public void watermarkUnchangedByHeartbeat() {
+        assertFalse(watermarkSnapshot.isEmpty(), "the prior window advanced at least one watermark");
+        assertEquals(watermarkSnapshot, readWatermarks(), "heartbeats never advance the watermark");
     }
 
     @Then("exactly one WARN reports transaction {string} excluded for stage {string} with reason {string}")
@@ -166,10 +181,14 @@ public class PrgSteps {
         Map<String, String> expected = new HashMap<>();
         table.asMaps().forEach(row ->
                 expected.put(e2eByLabel.get(row.get("transaction")), row.get("status")));
-        Map<String, String> actual = new HashMap<>();
+        assertEquals(expected, readWatermarks(), "watermarks advance only for emitted rows");
+    }
+
+    private Map<String, String> readWatermarks() {
+        Map<String, String> rows = new HashMap<>();
         jdbc.query("SELECT e2e, last_status FROM prg_watermark WHERE client=?",
-                rs -> { actual.put(rs.getString(1), rs.getString(2)); }, client);
-        assertEquals(expected, actual, "watermarks advance only for emitted rows");
+                rs -> { rows.put(rs.getString(1), rs.getString(2)); }, client);
+        return rows;
     }
 
     private int seedEntry(String label) {

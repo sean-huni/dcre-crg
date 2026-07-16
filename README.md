@@ -18,11 +18,26 @@ PRG projects per-transaction external status (the `ext_tx_status` view over spin
 
 One job `prgJob`, one tasklet step `psrStep`.
 
-- Scheduled run: delta selection, rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet), `status IS NOT NULL` only. Zero delta rows = NO file (the ExecutionContext records `psr.file=NONE`).
+- Scheduled run: delta selection, rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet), `status IS NOT NULL` only. Zero delta rows = a zero-valued heartbeat PSR (SCRUM-55, section below) so the consumer can tell "no movement" from "PRG dead".
 - Resend run (`resend=true`, non-identifying): ALL current known-status rows, watermark ignored; re-projects CURRENT state, not the original report (A-8).
 - R-38 exclusion visibility: mid-DAG rows with `status IS NULL` are never reportable. Up to 100 each gets a WARN in the uniform shape `excluded stage=PRG arrival=<uuid> seq=<n> e2e=<e2e> reason=STATUS_UNKNOWN`; above 100 they collapse to one summary WARN per client.
 - File: `<exchange-root>/<client-base>/onhost-resp/out/<CLIENT>_PSR_<window>.txt`; layout is SYNTHETIC-CONTRACT (R-35): header `PSR|client|window`, one `TX|e2e|status` per row ordered by e2e, trailer `END|count`. An unconfigured client fails the job closed (`IllegalArgumentException` from the layout) rather than writing to a wrong directory.
 - Outcome seam: on COMPLETED, `BUSINESS_ACCEPTED` to `<exchange-root>/outcomes/<JOB_NAME>` (`OutcomeFileWriter`, R-33).
+
+### SYNTHETIC-CONTRACT: heartbeat layout (SCRUM-55)
+
+A SCHEDULED window with zero delta emits a zero-valued, normal-format PSR instead of no file, so the OnHost consumer can distinguish "no movement" from "PRG dead":
+
+```text
+PSR|<client>|<window>
+HB|DCRE00000000000000000000000000000|DCRE00000000000000000000000000000|0|0.00
+PD|<pendingCount>
+END|0
+```
+
+- The HB placeholder is `DCRE` + 29 zeros (33 chars, Max35-safe). **SYNTHETIC-CONTRACT: the real legacy Payment Report response copybook and its exact zero-placeholder bytes are unrecovered; this shape is invented and is a critical future update once the copybook is attested (design-register A-item, A-57).**
+- `PD|<pendingCount>` counts the client's `prg_sla_pending` rows (members of VISIBLE outbound batches whose current status is non-terminal); zero pending prints `PD|0`. HB/PD are not TX lines, so the trailer stays `END|0`.
+- A heartbeat registers a `prg_report` row (type `HEARTBEAT`) but NEVER touches the delivery ledger or the watermark: nothing was externally reported. Only the SCHEDULED path heartbeats; IMMEDIATE/MANUAL no-ops stay file-less.
 
 ### Database and batch metadata
 
@@ -88,10 +103,12 @@ Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpa
 
 Testcontainers CockroachDB `cockroachdb/cockroach:v26.2.3` (Docker required):
 
-- `PrgJobTest`: end-to-end window sequence (first delta with deepest-leg statuses + exactly one R-38 WARN, unchanged window emits no file, single status flip emits exactly that row, resend re-emits all current rows) plus the SCRUM-42 fail-closed unconfigured-client case.
+- `PrgJobTest`: end-to-end window sequence (first delta with deepest-leg statuses + exactly one R-38 WARN, unchanged window emits the zero-valued heartbeat, single status flip emits exactly that row, resend re-emits all current rows) plus the SCRUM-42 fail-closed unconfigured-client case.
 - `PsrReportServiceSliceTest`: bounded-scan proofs (multi-slice delta -> one correct streamed PSR, restart-with-existing-target still advances watermarks, summary WARN above the detail limit).
 - `PsrReportServiceRetryTest`: 40001 retry semantics of the watermark advance.
-- Cucumber BDD suite: `src/test/resources/features/psr-window-projection.feature` (delta projection, no-movement window, status flip, resend, R-38 exclusion, watermark advance).
+- `ReportingSchemaIT` / `ImmediateReportIT`: SCRUM-55 status classes, delivery-ledger guard, batch-scoped `ext_tx_status` v2, due/SLA views; IMMEDIATE/MANUAL report modes with kill-resume proofs.
+- `HeartbeatIT`: SCRUM-55 zero-valued heartbeat (exact file shape, `prg_sla_pending` PD count, HEARTBEAT registry row, watermark/ledger untouched, R-24 restart no-op).
+- Cucumber BDD suite: `src/test/resources/features/psr-window-projection.feature` (delta projection, quiet-window heartbeat, status flip, resend, R-38 exclusion, watermark advance).
 
 ## Local cluster deployment
 
