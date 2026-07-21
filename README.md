@@ -4,7 +4,7 @@ PSR Generator: clock-windowed status reporter, the terminal stage of the DCRE re
 
 ## What it does
 
-PRG projects per-transaction external status (the `ext_tx_status` view over spine + validation + ISR/SBSR/PBSR response legs, deepest leg wins per R-17) and emits delta Payment Status Report (PSR) files per client on clock windows. Each run diffs `ext_tx_status` against the `prg_watermark` table for one client, streams the delta as a PSR flat file into the client's `onhost-resp/out` exchange directory, then advances the watermark in bounded slices. It is not file-triggered: AGT's clock instantiates `prgJob` per (client, window) as a short-lived Kubernetes Job, and PRG reports whatever `ext_tx_status` holds behind the watermark, serving the DC and ENDO flows alike.
+PRG projects per-transaction external status (the `ext_tx_status` view over spine + validation + ISR/SBSR/PBSR response legs, deepest leg wins per R-17) and emits delta Payment Status Report (PSR) files per client on clock windows. Each run diffs `ext_tx_status` against the `prg_watermark` table for one client, streams the delta as a PSR flat file into the client's `onhost-resp/out` exchange directory, then advances the watermark in bounded slices. It is not file-triggered: AGT's clock instantiates `prgJob` per (client, window) as a short-lived Kubernetes Job, and PRG reports whatever `ext_tx_status` holds behind the watermark, serving the DC Collections and ENDO Payments flows alike.
 
 ## Architecture and principles
 
