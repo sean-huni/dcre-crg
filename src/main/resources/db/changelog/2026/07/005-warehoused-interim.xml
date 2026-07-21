@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- SCRUM-68 warehoused interim reclassification (spec
+         2026-07-21-flow-taxonomy-mandates-design.md section 1 item 1). The RMB
+         DebiCheck Host-to-Host profile names ACWP (Future Dated Collections)
+         and ACWC (Auto-bumped Collections) as real, expected collection
+         statuses, so the 004 UNSUPPORTED ruling is corrected here: both become
+         accepted warehoused interim (reportable, non-terminal). A tx whose
+         latest status is accepted-warehoused has its response and must NOT age
+         on the 20h/24h SLA path, so the catalogue gains sla_suppressed and the
+         prg_sla_pending view is re-owned with the suppression predicate
+         (later-owner pattern, prg 004 report-due precedent). 004 stays
+         immutable. -->
+
+    <changeSet id="005-sla-suppressed-column" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="prg_status_class" columnName="sla_suppressed"/></not>
+        </preConditions>
+        <addColumn tableName="prg_status_class">
+            <column name="sla_suppressed" type="BOOLEAN"/>
+        </addColumn>
+        <rollback>
+            <dropColumn tableName="prg_status_class" columnName="sla_suppressed"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="005-sla-suppressed-backfill" author="dcre">
+        <update tableName="prg_status_class">
+            <column name="sla_suppressed" valueBoolean="false"/>
+            <where>sla_suppressed IS NULL</where>
+        </update>
+        <rollback>
+            <update tableName="prg_status_class">
+                <column name="sla_suppressed" valueComputed="NULL"/>
+                <where>sla_suppressed = false</where>
+            </update>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="005-sla-suppressed-not-null" author="dcre">
+        <!-- LIQUIBASE-SQL-EXCEPTION: column nullability has no typed precondition. -->
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="YES">
+                SELECT is_nullable FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'prg_status_class'
+                  AND column_name = 'sla_suppressed'
+            </sqlCheck>
+        </preConditions>
+        <addNotNullConstraint tableName="prg_status_class" columnName="sla_suppressed"
+                              columnDataType="BOOLEAN"/>
+        <rollback>
+            <dropNotNullConstraint tableName="prg_status_class" columnName="sla_suppressed"
+                                   columnDataType="BOOLEAN"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="005-reclassify-acwp-acwc" author="dcre">
+        <update tableName="prg_status_class">
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/>
+            <column name="sla_suppressed" valueBoolean="true"/>
+            <where>code IN ('ACWC', 'ACWP')</where>
+        </update>
+        <rollback>
+            <update tableName="prg_status_class">
+                <column name="classification" value="UNSUPPORTED"/>
+                <column name="reportable" valueBoolean="false"/>
+                <column name="sla_suppressed" valueBoolean="false"/>
+                <where>code IN ('ACWC', 'ACWP')</where>
+            </update>
+        </rollback>
+    </changeSet>
+
+    <!-- Owner of prg_sla_pending from 005 on: the 003 body plus the
+         suppression predicate. The 003 runOnChange body may not reference
+         sla_suppressed (fresh-bootstrap CREATE-time validation runs 003 before
+         this file adds the column), hence the later-owner move. -->
+    <changeSet id="005-sla-pending-suppression" author="dcre">
+        <createView viewName="prg_sla_pending" replaceIfExists="true"><![CDATA[
+            SELECT ms.client, ms.e2e, em.outbound_msg_id, em.visible_at,
+                   EXTRACT(EPOCH FROM (now() - em.visible_at)) / 3600 AS age_hours
+            FROM prg_member_status ms
+            JOIN crw_emission em ON em.id = ms.emission_id
+            WHERE em.state = 'VISIBLE' AND em.visible_at IS NOT NULL AND NOT ms.terminal
+              AND NOT EXISTS (SELECT 1 FROM prg_status_class sc
+                              WHERE sc.code = ms.status AND sc.sla_suppressed)
+        ]]></createView>
+        <rollback>
+            <createView viewName="prg_sla_pending" replaceIfExists="true"><![CDATA[
+            SELECT ms.client, ms.e2e, em.outbound_msg_id, em.visible_at,
+                   EXTRACT(EPOCH FROM (now() - em.visible_at)) / 3600 AS age_hours
+            FROM prg_member_status ms
+            JOIN crw_emission em ON em.id = ms.emission_id
+            WHERE em.state = 'VISIBLE' AND em.visible_at IS NOT NULL AND NOT ms.terminal
+        ]]></createView>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

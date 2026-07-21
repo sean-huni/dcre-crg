@@ -467,6 +467,11 @@
         ]]></createView>
     </changeSet>
 
+    <!-- OWNERSHIP MOVED: superseded by 005-sla-pending-suppression
+         (005-warehoused-interim.xml); never edit this body again. The 005
+         owner recreates the view with the sla_suppressed predicate; editing
+         this runOnChange body would re-run it AFTER 005 on migrated databases
+         and silently revert the suppression. -->
     <changeSet id="003-sla-pending-view" author="dcre" runOnChange="true">
         <createView viewName="prg_sla_pending" replaceIfExists="true"><![CDATA[
             SELECT ms.client, ms.e2e, em.outbound_msg_id, em.visible_at,
