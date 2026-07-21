@@ -12,6 +12,7 @@ import za.co.fnb.dcre.prg.data.model.LedgerRow;
 import za.co.fnb.dcre.prg.data.model.PrgReportEntity;
 import za.co.fnb.dcre.prg.data.repo.PrgDeliveryLedgerRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgReportRepo;
+import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
 
 import java.time.LocalDate;
 import java.util.HashMap;
@@ -36,13 +37,14 @@ import static org.assertj.core.api.Assertions.entry;
  *     per response table only the LATEST row per (emission, e2e) projects
  *     (max created_at, response_file tiebreaker), so a resend or a second
  *     response file for one emission never multiplies rows or flip-flops the
- *     status pick; prg_sla_pending reads ext_tx_status and inherits this.
+ *     status pick; prg_sla_pending uses the corresponding member-grain picks.
  * (b) prg_delivery_ledger auto rows are DB-arbitrated once per
  *     (client, e2e, status); manual_ref rows bypass the guard but ledger.
  * (c) prg_report_due lists COMPLETE (all members terminal, immediately) and
  *     IDLE (responses quiet past the 120s debounce with unreported deltas);
  *     recent, fully-ledgered and zero-response parents are absent.
- * (d) an unclassified status code (ACWC) fails closed as interim.
+ * (d) unsupported Fintegrate statuses are explicit protocol exceptions,
+ *     remain non-terminal and are never automatically reportable.
  * (e) prg_sla_pending ages non-terminal members of VISIBLE batches.
  */
 @SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
@@ -74,7 +76,13 @@ class ReportingSchemaIT {
     @Autowired
     PrgDeliveryLedgerRepo ledger;
 
+    @Autowired
+    PrgWatermarkRepo watermarks;
+
     record ExtRow(String status, boolean terminal, UUID emissionId, String outboundMsgId, String sourceMsgId) {
+    }
+
+    record StatusClass(String classification, boolean terminal, boolean reportable) {
     }
 
     // --- seed helpers (tables exist via the 001/003 bootstrap guards) ---
@@ -219,6 +227,26 @@ class ReportingSchemaIT {
         resp("isr_resp", null, "MSGA4_2", "E2ELEG2", "ACSP", null);
 
         assertThat(ext(a4, "E2ELEG2").status()).isEqualTo("ACSP");
+    }
+
+    @Test
+    void legacyNullEmissionUnsupportedStatusRemainsVisibleAsAProtocolException() {
+        String client = "LEG" + UUID.randomUUID().toString().substring(0, 8);
+        UUID arrival = parent(client, "MSGLEGACYEX");
+        tx(arrival, 1, "ELEGACYEX");
+        resp("pbsr_resp", null, "MSGLEGACYEX", "ELEGACYEX", "ACWC", 300);
+
+        ExtRow row = ext(arrival, "ELEGACYEX");
+        assertThat(row.status()).isEqualTo("ACWC");
+        assertThat(row.terminal()).isFalse();
+        assertThat(jdbc.queryForMap(
+                "SELECT source_msg_id, outbound_msg_id, status, classification"
+                        + " FROM prg_status_exception WHERE client=? AND e2e='ELEGACYEX'", client))
+                .containsEntry("source_msg_id", "MSGLEGACYEX")
+                .containsEntry("outbound_msg_id", null)
+                .containsEntry("status", "ACWC")
+                .containsEntry("classification", "UNSUPPORTED");
+        assertThat(watermarks.findRangeSlice(client, "", 10)).isEmpty();
     }
 
     @Test
@@ -409,25 +437,90 @@ class ReportingSchemaIT {
         assertThat(due(client)).containsOnly(entry("MSGPART", "IDLE"));
     }
 
-    // --- (d) unknown status code fails closed as interim ---
+    // --- (d) unsupported status codes fail closed as protocol exceptions ---
 
     @Test
-    void unclassifiedStatusCodeFailsClosedAsInterim() {
+    void unsupportedFintegrateStatusesAreExplicitAndNotAutomaticallyReportable() {
         UUID au = parent("FNBRF02", "MSGU");
         tx(au, 1, "EU1");
+        tx(au, 2, "EU2");
         UUID bu = batch(group(au, "FNBRF02", "MSGU", 1), au, 1, "MSGU");
         member(bu, 1, "EU1");
-        resp("pbsr_resp", bu, "EU1", "ACWC", 300); // ACWC deliberately absent from prg_status_class
+        member(bu, 2, "EU2");
+        resp("pbsr_resp", bu, "EU1", "ACWC", 300);
+        resp("pbsr_resp", bu, "EU2", "ACWP", 300);
+        jdbc.update("UPDATE crw_emission SET visible_at = now() - INTERVAL '21 hours' WHERE id = ?", bu);
 
         ExtRow row = ext(au, "EU1");
         assertThat(row.status()).isEqualTo("ACWC");
         assertThat(row.terminal()).isFalse();
-        assertThat(due("FNBRF02")).containsOnly(entry("MSGU", "IDLE")); // never COMPLETE on unclassified
+        assertThat(due("FNBRF02")).isEmpty();
+        assertThat(slaCount("FNBRF02")).isEqualTo(2L);
+        assertThat(jdbc.queryForObject(
+                "SELECT min(age_hours) FROM prg_sla_pending WHERE client='FNBRF02'", Double.class))
+                .isGreaterThan(20.0);
+
+        Map<String, StatusClass> expected = Map.ofEntries(
+                Map.entry("ACSC", new StatusClass("TERMINAL_SUCCESS", true, true)),
+                Map.entry("ACCC", new StatusClass("TERMINAL_SUCCESS", true, true)),
+                Map.entry("RJCT", new StatusClass("TERMINAL_NON_SUCCESS", true, true)),
+                Map.entry("CANC", new StatusClass("TERMINAL_NON_SUCCESS", true, true)),
+                Map.entry("ACSP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
+                Map.entry("ACTC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
+                Map.entry("ACCP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
+                Map.entry("ACFC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
+                Map.entry("RCVD", new StatusClass("PENDING_INTERIM", false, true)),
+                Map.entry("PDNG", new StatusClass("PENDING_INTERIM", false, true)),
+                Map.entry("PART", new StatusClass("PENDING_INTERIM", false, true)),
+                Map.entry("PATC", new StatusClass("PENDING_INTERIM", false, true)),
+                Map.entry("ACWC", new StatusClass("UNSUPPORTED", false, false)),
+                Map.entry("ACWP", new StatusClass("UNSUPPORTED", false, false)));
+        Map<String, StatusClass> actual = jdbc.query(
+                "SELECT code, classification, terminal, reportable FROM prg_status_class",
+                result -> {
+                    Map<String, StatusClass> classes = new HashMap<>();
+                    while (result.next()) {
+                        classes.put(result.getString("code"), new StatusClass(
+                                result.getString("classification"), result.getBoolean("terminal"),
+                                result.getBoolean("reportable")));
+                    }
+                    return classes;
+                });
+        assertThat(actual).containsExactlyInAnyOrderEntriesOf(expected);
 
         assertThat(jdbc.queryForObject(
-                "SELECT terminal FROM prg_status_class WHERE code='ACSC'", Boolean.class)).isTrue();
+                "SELECT count(*) FROM prg_status_exception WHERE client='FNBRF02'", Long.class)).isEqualTo(2L);
+        assertThat(watermarks.findDeltaSlice("FNBRF02", "", 10)).isEmpty();
+        assertThat(watermarks.findRangeSlice("FNBRF02", "", 10)).isEmpty();
+        assertThat(watermarks.findUnreportedForParent("FNBRF02", "MSGU", 10)).isEmpty();
+        assertThat(watermarks.findCurrentForParent("FNBRF02", "MSGU", "", 10)).isEmpty();
+    }
+
+    @Test
+    void unknownFintegrateStatusIsPreservedAsNonReportableProtocolException() {
+        String client = "UNK" + UUID.randomUUID().toString().substring(0, 8);
+        UUID arrival = parent(client, "MSGUNKNOWN");
+        tx(arrival, 1, "EUNKNOWN");
+        UUID emission = batch(group(arrival, client, "MSGUNKNOWN", 1), arrival, 1, "MSGUNKNOWN");
+        member(emission, 1, "EUNKNOWN");
+        resp("pbsr_resp", emission, "EUNKNOWN", "ZZZZ", 300);
+        jdbc.update("UPDATE crw_emission SET visible_at = now() - INTERVAL '21 hours' WHERE id = ?", emission);
+
+        ExtRow row = ext(arrival, "EUNKNOWN");
+        assertThat(row.status()).isEqualTo("ZZZZ");
+        assertThat(row.terminal()).isFalse();
+        assertThat(due(client)).isEmpty();
+        assertThat(slaCount(client)).isEqualTo(1L);
         assertThat(jdbc.queryForObject(
-                "SELECT count(*) FROM prg_status_class", Long.class)).isEqualTo(12L);
+                "SELECT age_hours FROM prg_sla_pending WHERE client=? AND e2e='EUNKNOWN'",
+                Double.class, client)).isGreaterThan(20.0);
+        assertThat(jdbc.queryForObject(
+                "SELECT classification FROM prg_status_exception WHERE client=? AND e2e='EUNKNOWN'",
+                String.class, client)).isEqualTo("UNKNOWN");
+        assertThat(watermarks.findDeltaSlice(client, "", 10)).isEmpty();
+        assertThat(watermarks.findRangeSlice(client, "", 10)).isEmpty();
+        assertThat(watermarks.findUnreportedForParent(client, "MSGUNKNOWN", 10)).isEmpty();
+        assertThat(watermarks.findCurrentForParent(client, "MSGUNKNOWN", "", 10)).isEmpty();
     }
 
     // --- (e) SLA pending view ages non-terminal members of VISIBLE batches ---
