@@ -27,6 +27,8 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
             FROM ext_tx_status x
             LEFT JOIN prg_watermark w ON w.client = x.client AND w.e2e = x.e2e
             WHERE x.client = :client AND x.status IS NOT NULL
+              AND (x.stage_rank = 1 OR EXISTS (SELECT 1 FROM prg_status_class sc
+                                               WHERE sc.code = x.status AND sc.reportable))
               AND (w.e2e IS NULL OR w.last_status <> x.status)
               AND x.e2e > :afterE2e
             ORDER BY x.e2e
@@ -34,11 +36,13 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
     List<StatusRow> findDeltaSlice(@Param("client") String client, @Param("afterE2e") String afterE2e,
                                    @Param("limit") int limit);
 
-    /** Resend override, same keyset slicing: ALL current known-status rows, watermark ignored. */
+    /** Resend override, same keyset slicing: all current reportable statuses, watermark ignored. */
     @Query(value = """
             SELECT x.e2e, x.status
             FROM ext_tx_status x
             WHERE x.client = :client AND x.status IS NOT NULL
+              AND (x.stage_rank = 1 OR EXISTS (SELECT 1 FROM prg_status_class sc
+                                               WHERE sc.code = x.status AND sc.reportable))
               AND x.e2e > :afterE2e
             ORDER BY x.e2e
             LIMIT :limit""", rowMapperClass = StatusRowMapper.class)
@@ -63,8 +67,8 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
     List<UnknownRow> findUnknownDetail(@Param("client") String client, @Param("limit") int limit);
 
     /**
-     * SCRUM-55 parent-scoped delta for IMMEDIATE reports: every current status
-     * of the parent's rows not yet auto-ledgered. Deliberately ledger-guarded
+     * SCRUM-55 parent-scoped delta for IMMEDIATE reports: every current reportable
+     * status of the parent's rows not yet auto-ledgered. Deliberately ledger-guarded
      * (not watermark-guarded): the delivery ledger is the authority on what
      * was externally reported, and re-reading after each ledgered slice makes
      * reported rows drop out, which is also the pagination (no keyset needed).
@@ -72,6 +76,8 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
     @Query(value = """
             SELECT x.e2e, x.status FROM ext_tx_status x
             WHERE x.client = :client AND x.source_msg_id = :sourceMsgId AND x.status IS NOT NULL
+              AND (x.stage_rank = 1 OR EXISTS (SELECT 1 FROM prg_status_class sc
+                                               WHERE sc.code = x.status AND sc.reportable))
               AND NOT EXISTS (SELECT 1 FROM prg_delivery_ledger l
                               WHERE l.client = x.client AND l.e2e = x.e2e AND l.status = x.status
                                 AND l.manual_ref IS NULL)
@@ -80,13 +86,15 @@ public interface PrgWatermarkRepo extends CrudRepository<PrgWatermarkEntity, UUI
             @Param("sourceMsgId") String sourceMsgId, @Param("limit") int limit);
 
     /**
-     * SCRUM-55 MANUAL regenerate-from-current-status: ALL current statuses of
-     * the parent, ledger ignored (the manual override bypasses the auto
-     * guard). Keyset pagination: manual ledger rows never drop out of reads.
+     * SCRUM-55 MANUAL regenerate-from-current-status: all current reportable
+     * statuses of the parent, ledger ignored (the manual override bypasses the
+     * auto guard). Keyset pagination: manual ledger rows never drop out of reads.
      */
     @Query(value = """
             SELECT x.e2e, x.status FROM ext_tx_status x
             WHERE x.client = :client AND x.source_msg_id = :sourceMsgId AND x.status IS NOT NULL
+              AND (x.stage_rank = 1 OR EXISTS (SELECT 1 FROM prg_status_class sc
+                                               WHERE sc.code = x.status AND sc.reportable))
               AND x.e2e > :afterE2e
             ORDER BY x.e2e LIMIT :limit""", rowMapperClass = StatusRowMapper.class)
     List<StatusRow> findCurrentForParent(@Param("client") String client,

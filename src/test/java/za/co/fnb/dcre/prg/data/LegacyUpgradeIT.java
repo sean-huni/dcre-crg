@@ -11,6 +11,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import javax.sql.DataSource;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -38,7 +39,8 @@ class LegacyUpgradeIT {
     static final String LEGACY_MASTER = "classpath:legacy/db.changelog-legacy-master.xml";
     static final String CURRENT_MASTER = "classpath:db/changelog/db.changelog-master.xml";
     static final List<String> V3_VIEWS = List.of("prg_isr_pick", "prg_sbsr_pick", "prg_pbsr_pick",
-            "prg_member_status", "ext_tx_status", "prg_report_due", "prg_sla_pending");
+            "prg_member_status", "ext_tx_status", "prg_report_due", "prg_sla_pending",
+            "prg_status_exception");
 
     @Test
     void legacyV2EndStateConvergesToV3UnderTheCurrentChangelog() throws LiquibaseException {
@@ -68,6 +70,59 @@ class LegacyUpgradeIT {
         assertThat(exectype(jdbc, "003-drop-report-due-v1-upgrade")).isEqualTo("MARK_RAN");
         assertThat(exectype(jdbc, "003-drop-sla-pending-v1-upgrade")).isEqualTo("MARK_RAN");
         assertThat(count(jdbc, "prg_report_due")).isZero();
+    }
+
+    @Test
+    void halfAppliedStatusClassificationConvergesUnderTheCurrentChangelog() throws LiquibaseException {
+        final JdbcTemplate jdbc = database("half_status_classification");
+        migrate(jdbc, LEGACY_MASTER);
+
+        // Reachable interrupted-DDL state: catalogue columns/rows and one
+        // constraint stand, but Liquibase never recorded any 004 changeset.
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN classification VARCHAR(32)");
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN reportable BOOLEAN");
+        jdbc.update("UPDATE prg_status_class SET classification='TERMINAL_SUCCESS', reportable=true"
+                + " WHERE code IN ('ACSC','ACCC')");
+        jdbc.update("UPDATE prg_status_class SET classification='TERMINAL_NON_SUCCESS', reportable=true"
+                + " WHERE code IN ('RJCT','CANC')");
+        jdbc.update("UPDATE prg_status_class SET classification='ACCEPTED_NON_TERMINAL', reportable=true"
+                + " WHERE code IN ('ACSP','ACTC','ACCP','ACFC')");
+        jdbc.update("UPDATE prg_status_class SET classification='PENDING_INTERIM', reportable=true"
+                + " WHERE code IN ('RCVD','PDNG','PART','PATC')");
+        jdbc.update("INSERT INTO prg_status_class(code,terminal,classification,reportable)"
+                + " VALUES ('ACWC',false,'UNSUPPORTED',false),('ACWP',false,'UNSUPPORTED',false)");
+        jdbc.execute("ALTER TABLE prg_status_class ALTER COLUMN classification SET NOT NULL");
+        jdbc.execute("""
+                CREATE VIEW prg_status_exception AS
+                SELECT x.client::VARCHAR(16) AS client,
+                       COALESCE(x.source_msg_id, h.msg_id)::VARCHAR(35) AS source_msg_id,
+                       x.outbound_msg_id::VARCHAR(64) AS outbound_msg_id,
+                       x.e2e::VARCHAR(35) AS e2e, x.status::VARCHAR(32) AS status,
+                       COALESCE(sc.classification, 'UNKNOWN')::VARCHAR(32) AS classification
+                FROM ext_tx_status x
+                JOIN tx_header h ON h.arrival_id = x.arrival_id
+                LEFT JOIN prg_status_class sc ON sc.code = x.status
+                WHERE x.status IS NOT NULL AND x.stage_rank > 1
+                  AND NOT COALESCE(sc.reportable, false)
+                """);
+
+        migrate(jdbc, CURRENT_MASTER);
+        migrate(jdbc, CURRENT_MASTER);
+
+        assertThat(exectype(jdbc, "004-status-classification-column")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-status-reportable-column")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-classify-acwc-unsupported")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-classify-acwp-unsupported")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-status-classification-not-null")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-status-reportable-not-null")).isEqualTo("EXECUTED");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_status_class", Long.class)).isEqualTo(14L);
+        assertThat(jdbc.queryForMap("SELECT classification, terminal, reportable"
+                + " FROM prg_status_class WHERE code='ACWC'"))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        "classification", "UNSUPPORTED", "terminal", false, "reportable", false));
+        assertThat(jdbc.queryForObject("SELECT view_definition FROM information_schema.views"
+                + " WHERE table_schema='public' AND table_name='prg_status_exception'", String.class))
+                .contains("ext_tx_status");
     }
 
     /** One logical database per scenario inside the shared container. */
