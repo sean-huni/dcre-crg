@@ -27,9 +27,9 @@ import java.util.UUID;
 
 /**
  * Business tier (SCRUM-55): parent-scoped IMMEDIATE and MANUAL PSR reports.
- * IMMEDIATE sends the parent's ledger-guarded delta (every current status not
- * yet auto-ledgered); MANUAL regen (manualRef set) resends ALL current
- * statuses, bypassing the guard but still ledgering with the manual_ref;
+ * IMMEDIATE sends the parent's ledger-guarded reportable delta; MANUAL regen
+ * (manualRef set) resends all current reportable statuses, bypassing the guard
+ * but still ledgering with the manual_ref;
  * replay re-renders one historical report byte-for-line from its ledger rows.
  *
  * <p>Every read+ledger slice runs in its OWN REQUIRES_NEW transaction: the
@@ -81,7 +81,10 @@ public class ImmediateReportService {
         return reportParent(client, sourceMsgId, windowKey, null);
     }
 
-    /** MANUAL regen when manualRef is set: all current statuses, guard bypassed, still ledgered. */
+    /**
+     * MANUAL regen when manualRef is set: all current reportable statuses,
+     * guard bypassed, still ledgered.
+     */
     public Optional<Path> reportParent(final String client, final String sourceMsgId,
                                        final String windowKey, final String manualRef) throws IOException {
         final Path target = outDir(client).resolve(client + "_PSR_" + windowKey + ".txt");

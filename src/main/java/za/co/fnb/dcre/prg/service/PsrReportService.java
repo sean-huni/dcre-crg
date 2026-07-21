@@ -31,7 +31,7 @@ import java.util.UUID;
  * PSR flat file layout is a SYNTHETIC-CONTRACT (R-35): header
  * "PSR|client|window", one "TX|e2e|status" per row, trailer "END|count".
  * Zero delta rows = a zero-valued HEARTBEAT file (SCRUM-55, below); resend
- * re-emits ALL current rows.
+ * re-emits all current reportable statuses.
  *
  * <p>SCRUM-42 load fix: whole-book reads plus a full in-heap render blew
  * CRDB's sql memory budget (2116569420 bytes on the 30M-tx book) and the JVM.
