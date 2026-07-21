@@ -64,7 +64,7 @@ END|0
 
 ### Database and batch metadata
 
-Liquibase with per-service history tables (`prg_databasechangelog` / `prg_databasechangeloglock`) on the shared `dcre_collections` DB:
+Liquibase with per-service history tables (`prg_databasechangelog` / `prg_databasechangeloglock`) on the shared `dcre_col` DB:
 
 1. `2026/07/001-prg.xml` changeSet 001: BOOTSTRAP-ORDER GUARD. PRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
 2. ChangeSet 002: `ext_tx_status` view, deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
@@ -96,7 +96,7 @@ Clean clone, no `.env` needed (committed dev defaults):
 ```bash
 ./gradlew build
 
-# one scheduled window against a reachable CockroachDB (defaults: localhost:26257/dcre_collections)
+# one scheduled window against a reachable CockroachDB (defaults: localhost:26257/dcre_col)
 java -jar build/libs/prg-2.0.jar client=FNBRF01 window=w1
 
 # resend override: non-identifying parameter, re-emits all current rows
@@ -109,7 +109,7 @@ Precedence: yml default < environment variable. All defaults are committed in `a
 
 | Env | Default | Purpose |
 |---|---|---|
-| `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_collections?sslmode=disable` | CockroachDB via pgwire |
+| `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable` | CockroachDB via pgwire |
 | `DCRE_DB_USER` | `root` | DB user |
 | `DCRE_DB_PASSWORD` | (empty) | DB password |
 | `DCRE_EXCHANGE_ROOT` | `../../../../../infra/dcre-infra/exchange` | Exchange root: PSR output tree + outcome seam |
