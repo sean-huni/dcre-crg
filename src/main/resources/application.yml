@@ -8,7 +8,7 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_collections?sslmode=disable}
+    url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable}
     username: ${DCRE_DB_USER:root}
     password: ${DCRE_DB_PASSWORD:}
   batch:
