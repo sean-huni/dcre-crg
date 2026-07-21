@@ -75,31 +75,50 @@ public class ImmediateReportService {
         this.sliceSize = sliceSize;
     }
 
-    /** IMMEDIATE mode: ledger-guarded parent delta. @return the emitted file, or empty when nothing is unreported. */
+    /** Job-less convenience (IMMEDIATE, direct callers/tests): no batch execution, so job_name stays null. */
     public Optional<Path> reportParent(final String client, final String sourceMsgId,
                                        final String windowKey) throws IOException {
-        return reportParent(client, sourceMsgId, windowKey, null);
+        return reportParent(client, sourceMsgId, windowKey, null, null);
     }
 
     /**
-     * MANUAL regen when manualRef is set: all current reportable statuses,
-     * guard bypassed, still ledgered.
+     * Job-less convenience: MANUAL regen when manualRef is set (all current
+     * reportable statuses, guard bypassed, still ledgered); job_name stays null.
      */
     public Optional<Path> reportParent(final String client, final String sourceMsgId,
                                        final String windowKey, final String manualRef) throws IOException {
+        return reportParent(client, sourceMsgId, windowKey, manualRef, null);
+    }
+
+    /**
+     * IMMEDIATE (manualRef null) or MANUAL regen (manualRef set): ledger-guarded
+     * or guard-bypassed parent delta.
+     *
+     * @param jobName SCRUM-58 clock-scoped trace anchor (env JOB_NAME or
+     *                {@code local-prg-<executionId>}), stamped on the report row.
+     * @return the emitted file, or empty when nothing is unreported.
+     */
+    public Optional<Path> reportParent(final String client, final String sourceMsgId,
+                                       final String windowKey, final String manualRef,
+                                       final String jobName) throws IOException {
         final Path target = outDir(client).resolve(client + "_PSR_" + windowKey + ".txt");
         final List<StatusRow> probe = freshTx.execute(s -> read(client, sourceMsgId, manualRef, ""));
         if (probe == null || probe.isEmpty()) {
             return recoverStanding(client, sourceMsgId, manualRef, target);
         }
-        final PrgReportEntity report = openReport(client, sourceMsgId, windowKey, manualRef, target);
+        final PrgReportEntity report = openReport(client, sourceMsgId, windowKey, manualRef, target, jobName);
         stream(report, client, sourceMsgId, manualRef, target);
         advanceWatermarks(client, report.getId());
         return Optional.of(target);
     }
 
-    /** Exact replay of one report from its ledger rows; audited as a new MANUAL prg_report row. */
+    /** Job-less convenience: replay audited with a null job_name. */
     public Path replay(final UUID reportId) throws IOException {
+        return replay(reportId, null);
+    }
+
+    /** Exact replay of one report from its ledger rows; audited as a new MANUAL prg_report row. */
+    public Path replay(final UUID reportId, final String jobName) throws IOException {
         final PrgReportEntity original = reports.findById(reportId).orElseThrow(
                 () -> new IllegalArgumentException("no prg_report row for report.id=" + reportId));
         final List<LedgerRow> rows = ledger.rowsForReport(reportId);
@@ -107,7 +126,7 @@ public class ImmediateReportService {
                 original.getFileName() + ".replay-" + Instant.now().getEpochSecond());
         final PrgReportEntity audit = freshTx.execute(s -> reports.save(PrgReportEntity.of(
                 original.getClient(), "MANUAL", "REPLAY", original.getWindowKey(),
-                original.getParentSourceMsgId(), target.getFileName().toString())));
+                original.getParentSourceMsgId(), target.getFileName().toString(), jobName)));
         try (StreamedPsrWrite psr = StreamedPsrWrite.begin(target,
                 "PSR|" + original.getClient() + "|" + original.getWindowKey())) {
             for (final LedgerRow row : rows) {
@@ -146,13 +165,14 @@ public class ImmediateReportService {
 
     /** find-or-save keyed on the unique file_name: a Batch restart of the same window reuses the row. */
     private PrgReportEntity openReport(final String client, final String sourceMsgId,
-                                       final String windowKey, final String manualRef, final Path target) {
+                                       final String windowKey, final String manualRef, final Path target,
+                                       final String jobName) {
         final String fileName = target.getFileName().toString();
         return freshTx.execute(s -> reports.findByFileName(fileName).orElseGet(() -> {
             final String trigger = watermarks.dueReason(client, sourceMsgId)
                     .orElse(manualRef == null ? "ADHOC" : "MANUAL");
             return reports.save(PrgReportEntity.of(client, manualRef == null ? "IMMEDIATE" : "MANUAL",
-                    trigger, windowKey, sourceMsgId, fileName));
+                    trigger, windowKey, sourceMsgId, fileName, jobName));
         }));
     }
 

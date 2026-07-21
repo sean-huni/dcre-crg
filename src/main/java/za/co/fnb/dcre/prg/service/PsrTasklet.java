@@ -5,6 +5,7 @@ import org.springframework.batch.core.step.StepContribution;
 import org.springframework.batch.core.step.tasklet.Tasklet;
 import org.springframework.batch.infrastructure.repeat.RepeatStatus;
 import org.springframework.stereotype.Component;
+import za.co.fnb.dcre.platform.batch.OutcomeFileWriter;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -37,11 +38,17 @@ public class PsrTasklet implements Tasklet {
     public RepeatStatus execute(final StepContribution contribution, final ChunkContext chunkContext)
             throws Exception {
         final Map<String, Object> params = chunkContext.getStepContext().getJobParameters();
+        // SCRUM-58: the seam job name (env JOB_NAME or local-prg-<executionId>) is
+        // resolved once here in the adapter and threaded into every report row so
+        // it commits in the same transaction as the prg_report insert.
+        final long executionId = chunkContext.getStepContext().getStepExecution()
+                .getJobExecution().getId();
+        final String jobName = OutcomeFileWriter.jobNameOrLocal("prg", executionId);
         final String type = (String) params.getOrDefault("report.type", "SCHEDULED");
         final String emitted = switch (type) {
-            case "SCHEDULED" -> scheduled(params);
-            case "IMMEDIATE" -> reportParents(params, null);
-            case "MANUAL" -> manual(params);
+            case "SCHEDULED" -> scheduled(params, jobName);
+            case "IMMEDIATE" -> reportParents(params, null, jobName);
+            case "MANUAL" -> manual(params, jobName);
             default -> throw new IllegalArgumentException("unsupported report.type=%s".formatted(type));
         };
         chunkContext.getStepContext().getStepExecution().getJobExecution()
@@ -49,22 +56,23 @@ public class PsrTasklet implements Tasklet {
         return RepeatStatus.FINISHED;
     }
 
-    private String scheduled(final Map<String, Object> params) throws IOException {
+    private String scheduled(final Map<String, Object> params, final String jobName) throws IOException {
         final String client = (String) params.get("client");
         final String window = (String) params.get("window");
         final boolean resend = "true".equals(params.get("resend"));
-        return service.window(client, window, resend).map(Object::toString).orElse("NONE");
+        return service.window(client, window, resend, jobName).map(Object::toString).orElse("NONE");
     }
 
-    private String manual(final Map<String, Object> params) throws IOException {
+    private String manual(final Map<String, Object> params, final String jobName) throws IOException {
         final String reportId = (String) params.get("report.id");
         if (reportId != null) {
-            return immediate.replay(UUID.fromString(reportId)).toString();
+            return immediate.replay(UUID.fromString(reportId), jobName).toString();
         }
-        return reportParents(params, (String) params.get("manual.ref"));
+        return reportParents(params, (String) params.get("manual.ref"), jobName);
     }
 
-    private String reportParents(final Map<String, Object> params, final String manualRef) throws IOException {
+    private String reportParents(final Map<String, Object> params, final String manualRef,
+                                 final String jobName) throws IOException {
         final String client = (String) params.get("client");
         final String window = (String) params.get("window");
         final String joined = (String) params.get("parents");
@@ -75,7 +83,7 @@ public class PsrTasklet implements Tasklet {
         final List<String> emitted = new ArrayList<>();
         for (int i = 0; i < parents.length; i++) {
             final String windowKey = parents.length == 1 ? window : window + "-" + (i + 1);
-            immediate.reportParent(client, parents[i].trim(), windowKey, manualRef)
+            immediate.reportParent(client, parents[i].trim(), windowKey, manualRef, jobName)
                     .ifPresent(path -> emitted.add(path.toString()));
         }
         return emitted.isEmpty() ? "NONE" : String.join(",", emitted);
