@@ -22,11 +22,17 @@ PRG projects per-transaction external status (the `ext_tx_status` view over spin
 - Terminal non-success: `RJCT`, `CANC`.
 - Accepted non-terminal: `ACSP`, `ACTC`, `ACCP`, `ACFC`.
 - Pending/interim: `RCVD`, `PDNG`, `PART`, `PATC`.
-- Unsupported by Fintegrate: `ACWC`, `ACWP`.
+- Accepted warehoused (SLA-suppressed): `ACWP` future-dated, `ACWC` auto-bumped per the RMB
+  DebiCheck profile.
 
-Unsupported and unknown Fintegrate codes are preserved unchanged but fail closed as non-terminal,
-non-reportable protocol exceptions. They appear in `prg_status_exception`, remain visible to the
-20h/24h pending-SLA path, and never enter scheduled, resend, immediate or manual-regeneration PSRs.
+Accepted warehoused codes (SCRUM-68, migration `2026/07/005`) are reportable non-terminal
+statuses: the transaction has its response, so it enters PSRs normally, but it is suppressed from
+the 20h/24h pending-SLA path via `prg_status_class.sla_suppressed` (`prg_sla_pending` excludes
+suppressed codes; otherwise every future-dated collection would false-amber).
+
+Unknown Fintegrate codes are preserved unchanged but fail closed as non-terminal, non-reportable
+protocol exceptions. They appear in `prg_status_exception`, remain visible to the 20h/24h
+pending-SLA path, and never enter scheduled, resend, immediate or manual-regeneration PSRs.
 DCRE never translates them into a supported code and never instructs OnHost to resubmit until
 Fintegrate confirms that no processing or settlement occurred. Exact historical report replay is
 unchanged because it replays the immutable delivery ledger rather than current status projection.
@@ -35,7 +41,7 @@ unchanged because it replays the immutable delivery ledger rather than current s
 
 One job `prgJob`, one tasklet step `psrStep`.
 
-- Scheduled run: delta selection, reportable rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet). Unsupported or unknown Fintegrate response codes are excluded. Zero delta rows = a zero-valued heartbeat PSR (SCRUM-55, section below) so the consumer can tell "no movement" from "PRG dead".
+- Scheduled run: delta selection, reportable rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet). Unknown Fintegrate response codes are excluded. Zero delta rows = a zero-valued heartbeat PSR (SCRUM-55, section below) so the consumer can tell "no movement" from "PRG dead".
 - Resend run (`resend=true`, non-identifying): all current reportable-status rows, watermark ignored; re-projects CURRENT state, not the original report (A-8).
 - R-38 exclusion visibility: mid-DAG rows with `status IS NULL` are never reportable. Up to 100 each gets a WARN in the uniform shape `excluded stage=PRG arrival=<uuid> seq=<n> e2e=<e2e> reason=STATUS_UNKNOWN`; above 100 they collapse to one summary WARN per client.
 - File: `<exchange-root>/<client-base>/onhost-resp/out/<CLIENT>_PSR_<window>.txt`; layout is SYNTHETIC-CONTRACT (R-35): header `PSR|client|window`, one `TX|e2e|status` per row ordered by e2e, trailer `END|count`. An unconfigured client fails the job closed (`IllegalArgumentException` from the layout) rather than writing to a wrong directory.
@@ -63,8 +69,9 @@ Liquibase with per-service history tables (`prg_databasechangelog` / `prg_databa
 1. `2026/07/001-prg.xml` changeSet 001: BOOTSTRAP-ORDER GUARD. PRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
 2. ChangeSet 002: `ext_tx_status` view, deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
 3. `2026/07/003-reporting.xml`: split-response correlation views, `prg_status_class`, report registry, delivery ledger, due/SLA views and the batch-scoped `ext_tx_status` replacement.
-4. `2026/07/004-status-classification.xml`: five-way classification for all fourteen recognised statuses, explicit unsupported rows for `ACWC`/`ACWP`, automatic-report suppression and `prg_status_exception`.
-5. `2026/07/002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
+4. `2026/07/004-status-classification.xml`: five-way classification for all fourteen recognised statuses, historical unsupported rows for `ACWC`/`ACWP` (corrected by 005), automatic-report suppression and `prg_status_exception`.
+5. `2026/07/005-warehoused-interim.xml`: SCRUM-68 reclassifies `ACWC`/`ACWP` as accepted warehoused interim (reportable, `sla_suppressed`) per the RMB DebiCheck profile and re-owns `prg_sla_pending` with the suppression predicate (later-owner pattern).
+6. `2026/07/002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
 
 ### Platform library dependencies (mavenLocal, 0.1.0)
 

@@ -10,6 +10,7 @@ import org.testcontainers.containers.CockroachContainer;
 import org.testcontainers.utility.DockerImageName;
 import za.co.fnb.dcre.prg.data.model.LedgerRow;
 import za.co.fnb.dcre.prg.data.model.PrgReportEntity;
+import za.co.fnb.dcre.prg.data.model.StatusRow;
 import za.co.fnb.dcre.prg.data.repo.PrgDeliveryLedgerRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgReportRepo;
 import za.co.fnb.dcre.prg.data.repo.PrgWatermarkRepo;
@@ -43,8 +44,10 @@ import static org.assertj.core.api.Assertions.entry;
  * (c) prg_report_due lists COMPLETE (all members terminal, immediately) and
  *     IDLE (responses quiet past the 120s debounce with unreported deltas);
  *     recent, fully-ledgered and zero-response parents are absent.
- * (d) unsupported Fintegrate statuses are explicit protocol exceptions,
- *     remain non-terminal and are never automatically reportable.
+ * (d) SCRUM-68: ACWC/ACWP are accepted warehoused interim statuses per the
+ *     RMB DebiCheck profile (ACWP future-dated, ACWC auto-bumped): reportable,
+ *     non-terminal, suppressed from the SLA aging path (sla_suppressed);
+ *     unknown codes still fail closed as non-reportable protocol exceptions.
  * (e) prg_sla_pending ages non-terminal members of VISIBLE batches.
  */
 @SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
@@ -82,7 +85,8 @@ class ReportingSchemaIT {
     record ExtRow(String status, boolean terminal, UUID emissionId, String outboundMsgId, String sourceMsgId) {
     }
 
-    record StatusClass(String classification, boolean terminal, boolean reportable) {
+    record StatusClass(String classification, boolean terminal, boolean reportable,
+                       boolean slaSuppressed) {
     }
 
     // --- seed helpers (tables exist via the 001/003 bootstrap guards) ---
@@ -230,7 +234,10 @@ class ReportingSchemaIT {
     }
 
     @Test
-    void legacyNullEmissionUnsupportedStatusRemainsVisibleAsAProtocolException() {
+    void legacyNullEmissionWarehousedStatusProjectsAsReportable() {
+        // SCRUM-68: the pre-005 premise (ACWC = UNSUPPORTED protocol exception)
+        // is exactly what 005 flips; the legacy NULL-emission row now projects
+        // as a reportable warehoused interim status, not an exception.
         String client = "LEG" + UUID.randomUUID().toString().substring(0, 8);
         UUID arrival = parent(client, "MSGLEGACYEX");
         tx(arrival, 1, "ELEGACYEX");
@@ -239,14 +246,11 @@ class ReportingSchemaIT {
         ExtRow row = ext(arrival, "ELEGACYEX");
         assertThat(row.status()).isEqualTo("ACWC");
         assertThat(row.terminal()).isFalse();
-        assertThat(jdbc.queryForMap(
-                "SELECT source_msg_id, outbound_msg_id, status, classification"
-                        + " FROM prg_status_exception WHERE client=? AND e2e='ELEGACYEX'", client))
-                .containsEntry("source_msg_id", "MSGLEGACYEX")
-                .containsEntry("outbound_msg_id", null)
-                .containsEntry("status", "ACWC")
-                .containsEntry("classification", "UNSUPPORTED");
-        assertThat(watermarks.findRangeSlice(client, "", 10)).isEmpty();
+        assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM prg_status_exception WHERE client=? AND e2e='ELEGACYEX'",
+                Long.class, client)).isZero();
+        assertThat(watermarks.findRangeSlice(client, "", 10))
+                .containsExactly(new StatusRow("ELEGACYEX", "ACWC"));
     }
 
     @Test
@@ -437,10 +441,10 @@ class ReportingSchemaIT {
         assertThat(due(client)).containsOnly(entry("MSGPART", "IDLE"));
     }
 
-    // --- (d) unsupported status codes fail closed as protocol exceptions ---
+    // --- (d) warehoused interim codes report; unknown codes fail closed ---
 
     @Test
-    void unsupportedFintegrateStatusesAreExplicitAndNotAutomaticallyReportable() {
+    void warehousedStatusesAreReportableAndSlaSuppressed() {
         UUID au = parent("FNBRF02", "MSGU");
         tx(au, 1, "EU1");
         tx(au, 2, "EU2");
@@ -454,46 +458,49 @@ class ReportingSchemaIT {
         ExtRow row = ext(au, "EU1");
         assertThat(row.status()).isEqualTo("ACWC");
         assertThat(row.terminal()).isFalse();
-        assertThat(due("FNBRF02")).isEmpty();
-        assertThat(slaCount("FNBRF02")).isEqualTo(2L);
-        assertThat(jdbc.queryForObject(
-                "SELECT min(age_hours) FROM prg_sla_pending WHERE client='FNBRF02'", Double.class))
-                .isGreaterThan(20.0);
+        // Reportable interim rows past the 120s debounce make the parent due.
+        assertThat(due("FNBRF02")).containsOnly(entry("MSGU", "IDLE"));
+        // The warehoused tx holds its response: it must NOT age on the SLA path.
+        assertThat(slaCount("FNBRF02")).isZero();
 
         Map<String, StatusClass> expected = Map.ofEntries(
-                Map.entry("ACSC", new StatusClass("TERMINAL_SUCCESS", true, true)),
-                Map.entry("ACCC", new StatusClass("TERMINAL_SUCCESS", true, true)),
-                Map.entry("RJCT", new StatusClass("TERMINAL_NON_SUCCESS", true, true)),
-                Map.entry("CANC", new StatusClass("TERMINAL_NON_SUCCESS", true, true)),
-                Map.entry("ACSP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
-                Map.entry("ACTC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
-                Map.entry("ACCP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
-                Map.entry("ACFC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true)),
-                Map.entry("RCVD", new StatusClass("PENDING_INTERIM", false, true)),
-                Map.entry("PDNG", new StatusClass("PENDING_INTERIM", false, true)),
-                Map.entry("PART", new StatusClass("PENDING_INTERIM", false, true)),
-                Map.entry("PATC", new StatusClass("PENDING_INTERIM", false, true)),
-                Map.entry("ACWC", new StatusClass("UNSUPPORTED", false, false)),
-                Map.entry("ACWP", new StatusClass("UNSUPPORTED", false, false)));
+                Map.entry("ACSC", new StatusClass("TERMINAL_SUCCESS", true, true, false)),
+                Map.entry("ACCC", new StatusClass("TERMINAL_SUCCESS", true, true, false)),
+                Map.entry("RJCT", new StatusClass("TERMINAL_NON_SUCCESS", true, true, false)),
+                Map.entry("CANC", new StatusClass("TERMINAL_NON_SUCCESS", true, true, false)),
+                Map.entry("ACSP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true, false)),
+                Map.entry("ACTC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true, false)),
+                Map.entry("ACCP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true, false)),
+                Map.entry("ACFC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true, false)),
+                Map.entry("RCVD", new StatusClass("PENDING_INTERIM", false, true, false)),
+                Map.entry("PDNG", new StatusClass("PENDING_INTERIM", false, true, false)),
+                Map.entry("PART", new StatusClass("PENDING_INTERIM", false, true, false)),
+                Map.entry("PATC", new StatusClass("PENDING_INTERIM", false, true, false)),
+                Map.entry("ACWC", new StatusClass("ACCEPTED_NON_TERMINAL", false, true, true)),
+                Map.entry("ACWP", new StatusClass("ACCEPTED_NON_TERMINAL", false, true, true)));
         Map<String, StatusClass> actual = jdbc.query(
-                "SELECT code, classification, terminal, reportable FROM prg_status_class",
+                "SELECT code, classification, terminal, reportable, sla_suppressed FROM prg_status_class",
                 result -> {
                     Map<String, StatusClass> classes = new HashMap<>();
                     while (result.next()) {
                         classes.put(result.getString("code"), new StatusClass(
                                 result.getString("classification"), result.getBoolean("terminal"),
-                                result.getBoolean("reportable")));
+                                result.getBoolean("reportable"), result.getBoolean("sla_suppressed")));
                     }
                     return classes;
                 });
         assertThat(actual).containsExactlyInAnyOrderEntriesOf(expected);
 
         assertThat(jdbc.queryForObject(
-                "SELECT count(*) FROM prg_status_exception WHERE client='FNBRF02'", Long.class)).isEqualTo(2L);
-        assertThat(watermarks.findDeltaSlice("FNBRF02", "", 10)).isEmpty();
-        assertThat(watermarks.findRangeSlice("FNBRF02", "", 10)).isEmpty();
-        assertThat(watermarks.findUnreportedForParent("FNBRF02", "MSGU", 10)).isEmpty();
-        assertThat(watermarks.findCurrentForParent("FNBRF02", "MSGU", "", 10)).isEmpty();
+                "SELECT count(*) FROM prg_status_exception WHERE client='FNBRF02'", Long.class)).isZero();
+        assertThat(watermarks.findDeltaSlice("FNBRF02", "", 10))
+                .containsExactly(new StatusRow("EU1", "ACWC"), new StatusRow("EU2", "ACWP"));
+        assertThat(watermarks.findRangeSlice("FNBRF02", "", 10))
+                .containsExactly(new StatusRow("EU1", "ACWC"), new StatusRow("EU2", "ACWP"));
+        assertThat(watermarks.findUnreportedForParent("FNBRF02", "MSGU", 10))
+                .containsExactly(new StatusRow("EU1", "ACWC"), new StatusRow("EU2", "ACWP"));
+        assertThat(watermarks.findCurrentForParent("FNBRF02", "MSGU", "", 10))
+                .containsExactly(new StatusRow("EU1", "ACWC"), new StatusRow("EU2", "ACWP"));
     }
 
     @Test

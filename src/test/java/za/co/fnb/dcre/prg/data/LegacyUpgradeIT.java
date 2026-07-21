@@ -115,14 +115,68 @@ class LegacyUpgradeIT {
         assertThat(exectype(jdbc, "004-classify-acwp-unsupported")).isEqualTo("MARK_RAN");
         assertThat(exectype(jdbc, "004-status-classification-not-null")).isEqualTo("MARK_RAN");
         assertThat(exectype(jdbc, "004-status-reportable-not-null")).isEqualTo("EXECUTED");
+        // SCRUM-68: the 005 warehoused-interim changesets run on the half-applied path.
+        assertThat(exectype(jdbc, "005-sla-suppressed-column")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-suppressed-backfill")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-suppressed-not-null")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-reclassify-acwp-acwc")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-pending-suppression")).isEqualTo("EXECUTED");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_status_class", Long.class)).isEqualTo(14L);
-        assertThat(jdbc.queryForMap("SELECT classification, terminal, reportable"
+        assertThat(jdbc.queryForMap("SELECT classification, terminal, reportable, sla_suppressed"
                 + " FROM prg_status_class WHERE code='ACWC'"))
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
-                        "classification", "UNSUPPORTED", "terminal", false, "reportable", false));
+                        "classification", "ACCEPTED_NON_TERMINAL", "terminal", false,
+                        "reportable", true, "sla_suppressed", true));
         assertThat(jdbc.queryForObject("SELECT view_definition FROM information_schema.views"
                 + " WHERE table_schema='public' AND table_name='prg_status_exception'", String.class))
                 .contains("ext_tx_status");
+        assertThat(jdbc.queryForObject("SELECT view_definition FROM information_schema.views"
+                + " WHERE table_schema='public' AND table_name='prg_sla_pending'", String.class))
+                .contains("sla_suppressed");
+    }
+
+    @Test
+    void status004EndStateReclassifiesWarehousedAndReownsSlaPending() throws LiquibaseException {
+        final JdbcTemplate jdbc = database("end_state_004");
+        migrate(jdbc, LEGACY_MASTER);
+
+        // The exact 004 end state: both catalogue columns present and NOT NULL,
+        // all fourteen rows classified with ACWC/ACWP standing as the 004
+        // UNSUPPORTED/non-reportable rows, no 005 changeset recorded.
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN classification VARCHAR(32)");
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN reportable BOOLEAN");
+        jdbc.update("UPDATE prg_status_class SET classification='TERMINAL_SUCCESS', reportable=true"
+                + " WHERE code IN ('ACSC','ACCC')");
+        jdbc.update("UPDATE prg_status_class SET classification='TERMINAL_NON_SUCCESS', reportable=true"
+                + " WHERE code IN ('RJCT','CANC')");
+        jdbc.update("UPDATE prg_status_class SET classification='ACCEPTED_NON_TERMINAL', reportable=true"
+                + " WHERE code IN ('ACSP','ACTC','ACCP','ACFC')");
+        jdbc.update("UPDATE prg_status_class SET classification='PENDING_INTERIM', reportable=true"
+                + " WHERE code IN ('RCVD','PDNG','PART','PATC')");
+        jdbc.update("INSERT INTO prg_status_class(code,terminal,classification,reportable)"
+                + " VALUES ('ACWC',false,'UNSUPPORTED',false),('ACWP',false,'UNSUPPORTED',false)");
+        jdbc.execute("ALTER TABLE prg_status_class ALTER COLUMN classification SET NOT NULL");
+        jdbc.execute("ALTER TABLE prg_status_class ALTER COLUMN reportable SET NOT NULL");
+
+        migrate(jdbc, CURRENT_MASTER);
+        migrate(jdbc, CURRENT_MASTER); // idempotent second run: no checksum errors, no re-runs
+
+        assertThat(exectype(jdbc, "005-sla-suppressed-column")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-suppressed-backfill")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-suppressed-not-null")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-reclassify-acwp-acwc")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-pending-suppression")).isEqualTo("EXECUTED");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_status_class", Long.class)).isEqualTo(14L);
+        assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM prg_status_class WHERE sla_suppressed", Long.class)).isEqualTo(2L);
+        assertThat(jdbc.queryForMap("SELECT classification, terminal, reportable, sla_suppressed"
+                + " FROM prg_status_class WHERE code='ACWP'"))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        "classification", "ACCEPTED_NON_TERMINAL", "terminal", false,
+                        "reportable", true, "sla_suppressed", true));
+        assertThat(jdbc.queryForObject("SELECT view_definition FROM information_schema.views"
+                + " WHERE table_schema='public' AND table_name='prg_sla_pending'", String.class))
+                .contains("sla_suppressed");
     }
 
     /** One logical database per scenario inside the shared container. */
