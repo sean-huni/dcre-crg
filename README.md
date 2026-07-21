@@ -70,8 +70,9 @@ Liquibase with per-service history tables (`prg_databasechangelog` / `prg_databa
 2. ChangeSet 002: `ext_tx_status` view, deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
 3. `2026/07/003-reporting.xml`: split-response correlation views, `prg_status_class`, report registry, delivery ledger, due/SLA views and the batch-scoped `ext_tx_status` replacement.
 4. `2026/07/004-status-classification.xml`: five-way classification for all fourteen recognised statuses, historical unsupported rows for `ACWC`/`ACWP` (corrected by 005), automatic-report suppression and `prg_status_exception`.
-5. `2026/07/005-warehoused-interim.xml`: SCRUM-68 reclassifies `ACWC`/`ACWP` as accepted warehoused interim (reportable, `sla_suppressed`) per the RMB DebiCheck profile and re-owns `prg_sla_pending` with the suppression predicate (later-owner pattern).
-6. `2026/07/002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
+5. `2026/07/004-prg-report-jobname.xml`: nullable `prg_report.job_name` + `ix_prg_report_job` (SCRUM-58), the clock-scoped file-trace join anchor for rpt `v_flow_trace` via `agt_ops.launch_intent.job_name`.
+6. `2026/07/005-warehoused-interim.xml`: SCRUM-68 reclassifies `ACWC`/`ACWP` as accepted warehoused interim (reportable, `sla_suppressed`) per the RMB DebiCheck profile and re-owns `prg_sla_pending` with the suppression predicate (later-owner pattern).
+7. `2026/07/002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
 
 ### Platform library dependencies (mavenLocal, 0.1.0)
 

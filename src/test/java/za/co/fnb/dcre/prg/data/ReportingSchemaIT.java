@@ -246,11 +246,42 @@ class ReportingSchemaIT {
         ExtRow row = ext(arrival, "ELEGACYEX");
         assertThat(row.status()).isEqualTo("ACWC");
         assertThat(row.terminal()).isFalse();
+        // Legacy-binding proof: a no-emission arrival carries no batch identity
+        // in ext_tx_status (outbound/source/emission all come from the
+        // member_emission -> group join). The header msg_id fallback is an
+        // exception-view COALESCE concern, proven by the unknown-code twin below.
+        assertThat(row.emissionId()).isNull();
+        assertThat(row.outboundMsgId()).isNull();
+        assertThat(row.sourceMsgId()).isNull();
         assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM prg_status_exception WHERE client=? AND e2e='ELEGACYEX'",
                 Long.class, client)).isZero();
         assertThat(watermarks.findRangeSlice(client, "", 10))
                 .containsExactly(new StatusRow("ELEGACYEX", "ACWC"));
+    }
+
+    @Test
+    void legacyNullEmissionUnknownStatusRemainsAProtocolExceptionViaTheHeaderFallback() {
+        // Pins the prg_status_exception legacy COALESCE arm (previously asserted
+        // nowhere): a NULL-emission row binding via orgnl_msg_id on a no-emission
+        // arrival surfaces with source_msg_id falling back to the header msg_id
+        // and outbound_msg_id NULL.
+        String client = "LGU" + UUID.randomUUID().toString().substring(0, 8);
+        UUID arrival = parent(client, "MSGLEGUNK");
+        tx(arrival, 1, "ELEGUNK");
+        resp("pbsr_resp", null, "MSGLEGUNK", "ELEGUNK", "ZZZZ", 300);
+
+        ExtRow row = ext(arrival, "ELEGUNK");
+        assertThat(row.status()).isEqualTo("ZZZZ");
+        assertThat(row.terminal()).isFalse();
+        assertThat(jdbc.queryForMap(
+                "SELECT source_msg_id, outbound_msg_id, status, classification"
+                        + " FROM prg_status_exception WHERE client=? AND e2e='ELEGUNK'", client))
+                .containsEntry("source_msg_id", "MSGLEGUNK")
+                .containsEntry("outbound_msg_id", null)
+                .containsEntry("status", "ZZZZ")
+                .containsEntry("classification", "UNKNOWN");
+        assertThat(watermarks.findRangeSlice(client, "", 10)).isEmpty();
     }
 
     @Test

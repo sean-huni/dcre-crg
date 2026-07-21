@@ -188,6 +188,35 @@ class HeartbeatIT {
                 + " AND e2e = 'E2EHBPD1'", String.class, client)).isEqualTo("CTV_PASS");
     }
 
+    @Test
+    void heartbeatPendingLineSuppressesWarehousedStatuses() throws Exception {
+        // SCRUM-68 companion to the PD-count test: a member whose LATEST status
+        // is accepted-warehoused (sla_suppressed, e.g. ACWC) holds its response
+        // and must NOT age on the SLA path, so the emission-path heartbeat
+        // prints PD|0 (pre-005 this exact seed printed PD|1).
+        String client = "FNBT08";
+        cleanExchange(client, client + "_PSR_hbsw-1.txt");
+        UUID arrival = parent(client, "MSGHBSW");
+        tx(arrival, 1, "E2EHBSW1");
+        UUID b = batch(group(arrival, client, "MSGHBSW"), arrival, "MSGHBSW");
+        member(b, 1, "E2EHBSW1");
+        // warehoused response already watermarked: zero delta, zero SLA-pending
+        jdbc.update("INSERT INTO pbsr_resp (response_file, orgnl_msg_id, e2e, status, emission_id)"
+                + " VALUES (?,?,?,?,?)", "RESP_HBSW_1.xml", "MSGHBSW", "E2EHBSW1", "ACWC", b);
+        watermark(client, "E2EHBSW1", "ACWC");
+
+        var path = service.window(client, "hbsw-1", false);
+
+        assertThat(path).isPresent();
+        assertThat(Files.readAllLines(path.get())).containsExactly(
+                "PSR|" + client + "|hbsw-1", HB_LINE, "PD|0", "END|0");
+        assertThat(reportType(client + "_PSR_hbsw-1.txt")).isEqualTo("HEARTBEAT");
+        // watermark untouched: still exactly the seeded ACWC row
+        assertThat(watermarkCount(client)).isEqualTo(1L);
+        assertThat(jdbc.queryForObject("SELECT last_status FROM prg_watermark WHERE client = ?"
+                + " AND e2e = 'E2EHBSW1'", String.class, client)).isEqualTo("ACWC");
+    }
+
     // --- (3) a window WITH delta emits the normal file: TX lines only, no HB/PD, type SCHEDULED ---
 
     @Test

@@ -161,6 +161,11 @@ class LegacyUpgradeIT {
         migrate(jdbc, CURRENT_MASTER);
         migrate(jdbc, CURRENT_MASTER); // idempotent second run: no checksum errors, no re-runs
 
+        // Premise pins: the seeded state IS 004's end state, so every guarded
+        // 004 changeset marks ran instead of re-executing.
+        assertThat(exectype(jdbc, "004-classify-acwc-unsupported")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-status-classification-not-null")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "004-status-reportable-not-null")).isEqualTo("MARK_RAN");
         assertThat(exectype(jdbc, "005-sla-suppressed-column")).isEqualTo("EXECUTED");
         assertThat(exectype(jdbc, "005-sla-suppressed-backfill")).isEqualTo("EXECUTED");
         assertThat(exectype(jdbc, "005-sla-suppressed-not-null")).isEqualTo("EXECUTED");
@@ -171,6 +176,57 @@ class LegacyUpgradeIT {
                 "SELECT count(*) FROM prg_status_class WHERE sla_suppressed", Long.class)).isEqualTo(2L);
         assertThat(jdbc.queryForMap("SELECT classification, terminal, reportable, sla_suppressed"
                 + " FROM prg_status_class WHERE code='ACWP'"))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(
+                        "classification", "ACCEPTED_NON_TERMINAL", "terminal", false,
+                        "reportable", true, "sla_suppressed", true));
+        assertThat(jdbc.queryForObject("SELECT view_definition FROM information_schema.views"
+                + " WHERE table_schema='public' AND table_name='prg_sla_pending'", String.class))
+                .contains("sla_suppressed");
+    }
+
+    @Test
+    void interrupted005DdlStateConvergesUnderTheCurrentChangelog() throws LiquibaseException {
+        final JdbcTemplate jdbc = database("half_warehoused_005");
+        migrate(jdbc, LEGACY_MASTER);
+
+        // 004 end state first (as in the sibling arm) ...
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN classification VARCHAR(32)");
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN reportable BOOLEAN");
+        jdbc.update("UPDATE prg_status_class SET classification='TERMINAL_SUCCESS', reportable=true"
+                + " WHERE code IN ('ACSC','ACCC')");
+        jdbc.update("UPDATE prg_status_class SET classification='TERMINAL_NON_SUCCESS', reportable=true"
+                + " WHERE code IN ('RJCT','CANC')");
+        jdbc.update("UPDATE prg_status_class SET classification='ACCEPTED_NON_TERMINAL', reportable=true"
+                + " WHERE code IN ('ACSP','ACTC','ACCP','ACFC')");
+        jdbc.update("UPDATE prg_status_class SET classification='PENDING_INTERIM', reportable=true"
+                + " WHERE code IN ('RCVD','PDNG','PART','PATC')");
+        jdbc.update("INSERT INTO prg_status_class(code,terminal,classification,reportable)"
+                + " VALUES ('ACWC',false,'UNSUPPORTED',false),('ACWP',false,'UNSUPPORTED',false)");
+        jdbc.execute("ALTER TABLE prg_status_class ALTER COLUMN classification SET NOT NULL");
+        jdbc.execute("ALTER TABLE prg_status_class ALTER COLUMN reportable SET NOT NULL");
+
+        // ... then the reachable mid-005 kill state: column added, backfilled,
+        // NOT NULL standing and the rows already reclassified, but Liquibase
+        // never recorded ANY 005 changeset (CRDB commits DDL per statement).
+        jdbc.execute("ALTER TABLE prg_status_class ADD COLUMN sla_suppressed BOOLEAN");
+        jdbc.update("UPDATE prg_status_class SET sla_suppressed = false WHERE sla_suppressed IS NULL");
+        jdbc.execute("ALTER TABLE prg_status_class ALTER COLUMN sla_suppressed SET NOT NULL");
+        jdbc.update("UPDATE prg_status_class SET classification='ACCEPTED_NON_TERMINAL',"
+                + " reportable=true, sla_suppressed=true WHERE code IN ('ACWC','ACWP')");
+
+        migrate(jdbc, CURRENT_MASTER);
+        migrate(jdbc, CURRENT_MASTER);
+
+        assertThat(exectype(jdbc, "005-sla-suppressed-column")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "005-sla-suppressed-not-null")).isEqualTo("MARK_RAN");
+        assertThat(exectype(jdbc, "005-sla-suppressed-backfill")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-reclassify-acwp-acwc")).isEqualTo("EXECUTED");
+        assertThat(exectype(jdbc, "005-sla-pending-suppression")).isEqualTo("EXECUTED");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_status_class", Long.class)).isEqualTo(14L);
+        assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM prg_status_class WHERE sla_suppressed", Long.class)).isEqualTo(2L);
+        assertThat(jdbc.queryForMap("SELECT classification, terminal, reportable, sla_suppressed"
+                + " FROM prg_status_class WHERE code='ACWC'"))
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
                         "classification", "ACCEPTED_NON_TERMINAL", "terminal", false,
                         "reportable", true, "sla_suppressed", true));
