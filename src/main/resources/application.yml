@@ -11,6 +11,10 @@ spring:
     url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable}
     username: ${DCRE_DB_USER:root}
     password: ${DCRE_DB_PASSWORD:}
+    # SCRUM-90: the batch pool READ COMMITTED isolation is now shipped fleet-wide from
+    # platform-batch (dcre-batch-datasource.yml via BatchDatasourceEnvironmentPostProcessor) and
+    # enforced at startup by ReadCommittedStartupAssertion. The per-service hikari
+    # transaction-isolation line was removed here so there is exactly one source of truth.
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.xml
     # Shared DB, per-service migration history (same isolation idea as PRG_BATCH_)
