@@ -11,10 +11,6 @@ spring:
     url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable}
     username: ${DCRE_DB_USER:root}
     password: ${DCRE_DB_PASSWORD:}
-  batch:
-    jdbc:
-      table-prefix: PRG_BATCH_
-      initialize-schema: never
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.xml
     # Shared DB, per-service migration history (same isolation idea as PRG_BATCH_)
@@ -22,6 +18,11 @@ spring:
     database-change-log-lock-table: prg_databasechangeloglock
 
 dcre:
+  batch:
+    table-prefix: PRG_BATCH_
+  agtops-db-url: ${DCRE_AGTOPS_DB_URL:jdbc:postgresql://localhost:26257/agt_ops?sslmode=disable}
+  agtops-db-user: ${DCRE_AGTOPS_DB_USER:root}
+  agtops-db-password: ${DCRE_AGTOPS_DB_PASSWORD:}
   exchange-root: ${DCRE_EXCHANGE_ROOT:../../../../../infra/dcre-infra/exchange}
   amount-scale: ${DCRE_AMOUNT_SCALE:2}
   v1-enabled: ${DCRE_V1_ENABLED:false}

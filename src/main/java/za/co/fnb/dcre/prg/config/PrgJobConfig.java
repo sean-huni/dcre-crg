@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.transaction.PlatformTransactionManager;
+import za.co.fnb.dcre.platform.batch.HeartbeatWriter;
 import za.co.fnb.dcre.platform.batch.OutcomeSeamListener;
 import za.co.fnb.dcre.platform.batch.StaleExecutionSweeper;
 import za.co.fnb.dcre.prg.service.PsrTasklet;
@@ -22,6 +23,7 @@ public class PrgJobConfig {
 
     @Bean
     public Job prgJob(JobRepository repo, PlatformTransactionManager tx, PsrTasklet tasklet,
+                      HeartbeatWriter heartbeatWriter,
                       @Value("${dcre.exchange-root}") String exchangeRoot) {
         Step psrStep = new StepBuilder("psrStep", repo).tasklet(tasklet, tx).build();
         // SCRUM-58: the shared seam listener replaces the per-module SeamListener
@@ -30,6 +32,7 @@ public class PrgJobConfig {
         // local-prg-<executionId> when JOB_NAME is absent.
         return new JobBuilder("prgJob", repo)
                 .listener(new OutcomeSeamListener("prg", exchangeRoot, execution -> "BUSINESS_ACCEPTED"))
+                .listener(heartbeatWriter)
                 .start(psrStep)
                 .build();
     }
