@@ -11,5 +11,6 @@
     <include file="db/changelog/2026/07/004-status-classification.xml"/>
     <include file="db/changelog/2026/07/004-prg-report-jobname.xml"/>
     <include file="db/changelog/2026/07/005-warehoused-interim.xml"/>
+    <include file="db/changelog/2026/07/006-man-collection-outcome.xml"/>
 
 </databaseChangeLog>

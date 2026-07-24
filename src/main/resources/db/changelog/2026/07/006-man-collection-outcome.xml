@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- A-70 (SCRUM-78, M10): the REAL dcre_col source for MSR's suspension sweep
+         (consecutive terminal-failed collections PER MANDATE_REF), replacing MSR's
+         interim collection_result placeholder. Bootstrap-ordered LAST so both view
+         sources already exist: ext_tx_status (003-reporting.xml, v2) and
+         prg_status_class incl. classification (004-status-classification.xml).
+
+         Collection <-> mandate link is now DIRECT: the M10 foundation
+         (crr 006-mandate-ref.xml :: crr-006-mandate-ref-column) added mandate_ref
+         to the tx_entry spine, so a collection carries its mandate reference on
+         its own row. No contract_ref indirection. -->
+
+    <!-- BOOTSTRAP-ORDER GUARD (same contract as 001-bootstrap-sources-prg): PRG is
+         clock-launched and may run on a fresh DB before CRR ever executed, so the
+         tx_entry.mandate_ref column is pre-added here with the OWNER's EXACT shape
+         (CRR 006-mandate-ref.xml). columnExists MARK_RAN so whichever service runs
+         first wins and the other converges; per-service liquibase history keeps
+         re-runs safe. Nullable by design: V1/V2 books carry no mandate_ref field. -->
+    <changeSet id="prg-006-tx-entry-mandate-ref" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="tx_entry" columnName="mandate_ref"/></not>
+        </preConditions>
+        <addColumn tableName="tx_entry">
+            <column name="mandate_ref" type="VARCHAR(35)"/>
+        </addColumn>
+        <rollback>
+            <dropColumn tableName="tx_entry" columnName="mandate_ref"/>
+        </rollback>
+    </changeSet>
+
+    <!-- man_collection_outcome: one row per collection line (tx_entry is 1:1 with
+         ext_tx_status), carrying its mandate_ref, the projected terminal status, a
+         terminal-failure flag, and the ingestion timestamp for "most recent N"
+         ordering. MSR reads it BY mandate_ref over its READ-ONLY dcre_col datasource.
+
+         is_terminal_failure = the status classifies as TERMINAL_NON_SUCCESS
+         (RJCT / CANC, per 004-status-classification.xml). An unclassified / unknown
+         status (a LEFT JOIN miss) COALESCEs to false, so only a KNOWN terminal
+         non-success counts against the mandate. Sean's spec: ANY terminal
+         non-success counts; there is NO reason-code filter.
+
+         Grain: ext_tx_status is 1:1 with tx_entry and keyed by the tx identity
+         (arrival_id, sequence) - its A-40 v2 guard exists precisely because one
+         e2e can recur across arrivals, so this joins on (arrival_id, sequence),
+         NEVER on e2e alone. occurred_at = tx_entry.created_at, the collection
+         line's ingestion time (ext_tx_status projects no response timestamp), the
+         available chronological key for the sweep's DESC ordering.
+
+         Rows with NULL mandate_ref (non-mandate collections) are excluded.
+
+         GRANT: MSR's dcre_col connection is root (ColDatasourceConfig default
+         dcre.col-db-user), a superuser, so NO GRANT is required and no scoped msr
+         col-read role is provisioned in any changelog. If one is later added, a
+         role-guarded GRANT mirroring msr-001-man-ctv-view-grant applies (MARK_RAN
+         while the role is absent). -->
+    <changeSet id="prg-006-man-collection-outcome-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="man_collection_outcome"/></not>
+        </preConditions>
+        <createView viewName="man_collection_outcome"><![CDATA[
+            SELECT t.mandate_ref,
+                   x.e2e,
+                   x.status,
+                   COALESCE(sc.classification = 'TERMINAL_NON_SUCCESS', false) AS is_terminal_failure,
+                   t.created_at AS occurred_at
+            FROM tx_entry t
+            JOIN ext_tx_status x ON x.arrival_id = t.arrival_id AND x.sequence = t.sequence
+            LEFT JOIN prg_status_class sc ON sc.code = x.status
+            WHERE t.mandate_ref IS NOT NULL
+        ]]></createView>
+        <rollback>
+            <dropView viewName="man_collection_outcome"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
