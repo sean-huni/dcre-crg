@@ -11,10 +11,15 @@ spring:
     url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable}
     username: ${DCRE_DB_USER:root}
     password: ${DCRE_DB_PASSWORD:}
-    # SCRUM-90: the batch pool READ COMMITTED isolation is now shipped fleet-wide from
-    # platform-batch (dcre-batch-datasource.yml via BatchDatasourceEnvironmentPostProcessor) and
-    # enforced at startup by ReadCommittedStartupAssertion. The per-service hikari
-    # transaction-isolation line was removed here so there is exactly one source of truth.
+    hikari:
+      # SCRUM-90: prg-ONLY READ COMMITTED (not fleet-wide). prg is the sole service whose
+      # concurrent report jobs hit an uncatchable 40001 (RETRY_SERIALIZABLE) at the Batch-6
+      # persistent-JobRepository chunk commit; READ COMMITTED removes it and prg's writes are
+      # full-identity guarded UPSERTs (ON CONFLICT (client,e2e)) so zero-dup is preserved.
+      # It is NOT applied fleet-wide because ctv/rpt use cluster_logical_timestamp() /
+      # AS OF SYSTEM TIME, which CockroachDB supports only under SERIALIZABLE. Every other
+      # stage stays on the SERIALIZABLE default.
+      transaction-isolation: TRANSACTION_READ_COMMITTED
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.xml
     # Shared DB, per-service migration history (same isolation idea as PRG_BATCH_)
