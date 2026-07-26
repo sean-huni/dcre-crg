@@ -2,3 +2,5 @@ build/
 .gradle/
 .env
 .DS_Store
+.idea/
+*.iml
