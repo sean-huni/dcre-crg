@@ -5,7 +5,10 @@ plugins {
 }
 group = 'za.co.fnb.dcre'
 version = '2.0'
-java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+java {
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+}
 repositories { mavenCentral(); mavenLocal() }
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-batch'
