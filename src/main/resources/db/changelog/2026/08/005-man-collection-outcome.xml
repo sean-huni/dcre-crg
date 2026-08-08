@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         CRG v1 BASELINE, part 5 of 5: man_collection_outcome (A-70, M10).
+
+         [!CONVENTION-OVERRIDE] This view exists in dcre_col and is read by
+         mandates/mrg over a SECOND datasource, which breaks database-per-service:
+         https://microservices.io/patterns/data/database-per-service.html. That canon
+         says no service reads another service's tables, ever, including read-only,
+         including through a view. Restated in ~/.claude/rules/_global/microservices.md
+         section 2, and named in the banned-shapes table there.
+
+         WHY IT IS HERE ANYWAY, ruled by the owner 2026-08-08: restore it, cut over,
+         build the composition afterwards.
+
+           - It is genuinely a COLLECTIONS view. Its body reads tx_entry, ext_tx_status
+             and prg_status_class and zero mandates tables, so collections is the only
+             family that can compute it. It was removed on the reasoning that "mandates
+             reads it and no collections code does", which is a statement about
+             CONSUMERS, not about ownership.
+           - MRG does not degrade without it. CollectionOutcomeDao issues
+             SELECT is_terminal_failure FROM man_collection_outcome, so an absent view
+             raises "relation does not exist" on EVERY report window, not "no
+             suspensions". The failure is total and per-window, and it is the reason
+             the cutover cannot wait for the target design.
+           - The target design below is NOT built. Restoring a known override with its
+             retirement condition written down is the honest state; shipping a broken
+             cutover and calling it architecture is not.
+
+         RETIREMENT CONDITION, and it already has a home: the suspension contract in
+         mrg's db/changelog/2026/07/005-man-effective.xml describes suspension deriving
+         from consecutive failed collection attempts "recorded in
+         man_collection_outcome in dcre_col". This override retires when that file's
+         contract is restated against a projection MRG owns.
+
+         TARGET DESIGN, recorded and not built:
+           1. collections publishes the terminal-failure fact per (mandate_ref, e2e) via
+              a transactional outbox
+              (https://microservices.io/patterns/data/transactional-outbox.html), or an
+              Open Host Service endpoint over the same projection;
+           2. MRG keeps its OWN projection in dcre_man behind an anti-corruption layer
+              whose client DTOs are GENERATED from the published schema, never
+              hand-maintained;
+           3. MRG's second datasource (ColDatasourceConfig) is deleted, which is the
+              observable end of this override: while that bean exists, the override does.
+
+         Ordering: this file runs LAST because the body resolves ext_tx_status (part 4)
+         and prg_status_class (part 3) at CREATE time, and CockroachDB resolves a view
+         body when the view is created rather than when it is queried.
+
+         No bootstrap guard on tx_entry.mandate_ref, unlike the pre-v1 version of this
+         file. CRR's v1 baseline creates the column unguarded
+         (crr 2026/08/002-spine.xml), every DCRE database is dropped and recreated at
+         the v1 cutover, and a CRG mint winning that race would crashloop the owner.
+         A missing relation here fails loudly and names itself, which is what a
+         dependency-ordered baseline is supposed to do.
+         ============================================================================ -->
+
+    <!-- One row per collection line (tx_entry is 1:1 with ext_tx_status), carrying its
+         mandate_ref, the projected terminal status, a terminal-failure flag and the
+         ingestion timestamp for "most recent N" ordering. MRG reads it BY mandate_ref
+         over its read-only dcre_col datasource.
+
+         is_terminal_failure = the status classifies as TERMINAL_NON_SUCCESS (RJCT /
+         CANC, per 003-status-classification.xml). An unclassified or unknown status is
+         a LEFT JOIN miss and COALESCEs to false, so only a KNOWN terminal non-success
+         counts against the mandate. Sean's spec: ANY terminal non-success counts, and
+         there is no reason-code filter.
+
+         Grain: ext_tx_status is keyed by the tx identity (arrival_id, sequence), and
+         its A-40 guard exists precisely because one e2e can recur across arrivals, so
+         this joins on (arrival_id, sequence) and NEVER on e2e alone.
+
+         occurred_at = tx_entry.created_at, the collection line's ingestion time.
+         ext_tx_status projects no response timestamp, so this is the available
+         chronological key for the sweep's DESC ordering.
+
+         Rows with NULL mandate_ref (non-mandate collections, and every legacy V1/V2
+         book, A-72) are excluded. -->
+    <changeSet id="crg-v1-man-collection-outcome-view" author="dcre">
+        <createView viewName="man_collection_outcome"><![CDATA[
+            SELECT t.mandate_ref,
+                   x.e2e,
+                   x.status,
+                   COALESCE(sc.classification = 'TERMINAL_NON_SUCCESS', false) AS is_terminal_failure,
+                   t.created_at AS occurred_at
+            FROM tx_entry t
+            JOIN ext_tx_status x ON x.arrival_id = t.arrival_id AND x.sequence = t.sequence
+            LEFT JOIN prg_status_class sc ON sc.code = x.status
+            WHERE t.mandate_ref IS NOT NULL
+        ]]></createView>
+        <rollback>
+            <dropView viewName="man_collection_outcome"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -41,10 +41,15 @@
          fails loudly and names the missing relation, which is strictly better than
          the previous behaviour of inventing a table and drifting from its owner.
 
-         man_collection_outcome is NOT here. It was a MANDATES view created by a
-         collections changelog: mandates/mrg reads it and no collections code does.
-         Removed from collections entirely rather than rehomed, because the mandates
-         family is owned elsewhere.
+         man_collection_outcome is not here because it depends on ext_tx_status below,
+         so it is part 5 (005-man-collection-outcome.xml). It was briefly removed from
+         collections altogether on the reasoning that mandates/mrg reads it and no
+         collections code does; the owner ruled that back on 2026-08-08, because that
+         is a statement about CONSUMERS and not about ownership. The view's body reads
+         tx_entry, ext_tx_status and prg_status_class and zero mandates tables, and its
+         absence raises "relation does not exist" on every MRG report window rather
+         than degrading to "no suspensions". Part 5 carries the full
+         [!CONVENTION-OVERRIDE] and its retirement condition.
          ============================================================================ -->
 
     <!-- Latest-row pick per (emission, e2e) per response table, one window pass each.

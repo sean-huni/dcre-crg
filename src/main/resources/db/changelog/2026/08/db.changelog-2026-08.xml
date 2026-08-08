@@ -18,5 +18,9 @@
     <include file="db/changelog/2026/08/002-reporting-tables.xml"/>
     <include file="db/changelog/2026/08/003-status-classification.xml"/>
     <include file="db/changelog/2026/08/004-reporting-views.xml"/>
+    <!-- Part 5 is LAST because its body resolves part 4's ext_tx_status and part 3's
+         prg_status_class at CREATE time. It carries a [!CONVENTION-OVERRIDE]: it is the
+         one relation in this schema a service outside collections reads. -->
+    <include file="db/changelog/2026/08/005-man-collection-outcome.xml"/>
 
 </databaseChangeLog>
