@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         CRG v1 BASELINE, part 3 of 4: the response-status catalogue.
+
+         THIS IS THE VERSION 1 BASELINE. Every DCRE database is dropped and recreated
+         at the v1 cutover, so the catalogue is stated ONCE in its settled form
+         instead of being replayed as the history that produced it. Before this
+         rewrite the same fourteen rows took four files and thirteen changesets: an
+         initial terminal-only catalogue, two nullable columns added and later made
+         NOT NULL, five classifying updates, two conditional inserts guarded on row
+         existence, a third column added, backfilled and made NOT NULL, and one final
+         update reversing an earlier ruling on two codes. Every one of those steps
+         existed to move a database that already held rows. None can occur here, and
+         reproducing them would encode a migration nobody can run as if it were the
+         design. The end state is identical: the ACWC/ACWP correction is applied in
+         place rather than as a later reversal.
+
+         R-21: status classes live in a reference table, never in a Java enum, so an
+         enum refactor cannot rewrite history. Codes are stored as their literal wire
+         values.
+
+         The four attributes answer four different questions and are not derivable
+         from one another:
+           terminal        the transaction has reached a final state
+           classification  the business class an operator sees
+           reportable      the status may enter an AUTOMATIC report
+           sla_suppressed  the status has its response, so it must not age on the
+                           20h/24h SLA path even though it is not terminal
+
+         ACWC (Auto-bumped Collections) and ACWP (Future Dated Collections) are named
+         by the RMB DebiCheck Host-to-Host profile as real, expected collection
+         statuses. They are accepted warehoused interim: reportable, non-terminal, and
+         SLA-suppressed. An earlier ruling had them UNSUPPORTED; that was corrected
+         and the correction is what this baseline states.
+
+         A code absent from this table is UNKNOWN, not an error: the projection views
+         LEFT JOIN and COALESCE, so an unrecognised Fintegrate status projects as a
+         protocol exception rather than failing the run.
+         ============================================================================ -->
+
+    <changeSet id="crg-v1-status-class" author="dcre">
+        <createTable tableName="prg_status_class">
+            <column name="code" type="VARCHAR(8)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="terminal" type="BOOLEAN"><constraints nullable="false"/></column>
+            <column name="classification" type="VARCHAR(32)"><constraints nullable="false"/></column>
+            <column name="reportable" type="BOOLEAN"><constraints nullable="false"/></column>
+            <column name="sla_suppressed" type="BOOLEAN"><constraints nullable="false"/></column>
+        </createTable>
+        <rollback>
+            <dropTable tableName="prg_status_class"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-status-catalogue" author="dcre">
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACSC"/><column name="terminal" valueBoolean="true"/>
+            <column name="classification" value="TERMINAL_SUCCESS"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACCC"/><column name="terminal" valueBoolean="true"/>
+            <column name="classification" value="TERMINAL_SUCCESS"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="RJCT"/><column name="terminal" valueBoolean="true"/>
+            <column name="classification" value="TERMINAL_NON_SUCCESS"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="CANC"/><column name="terminal" valueBoolean="true"/>
+            <column name="classification" value="TERMINAL_NON_SUCCESS"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACSP"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACTC"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACCP"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACFC"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="RCVD"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="PENDING_INTERIM"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="PDNG"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="PENDING_INTERIM"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="PART"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="PENDING_INTERIM"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="PATC"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="PENDING_INTERIM"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="false"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACWC"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="true"/>
+        </insert>
+        <insert tableName="prg_status_class">
+            <column name="code" value="ACWP"/><column name="terminal" valueBoolean="false"/>
+            <column name="classification" value="ACCEPTED_NON_TERMINAL"/>
+            <column name="reportable" valueBoolean="true"/><column name="sla_suppressed" valueBoolean="true"/>
+        </insert>
+        <rollback>
+            <delete tableName="prg_status_class"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         CRG v1 BASELINE, part 2 of 4: the tables CRG OWNS, plus the read indexes CRG
+         owns on the shared response tables.
+
+         THIS IS THE VERSION 1 BASELINE. Every DCRE database is dropped and recreated
+         at the v1 cutover, so every object below is created against an empty schema
+         by its single owner. The usual re-run guards are therefore absent, and the
+         absence is deliberate: an onFail="MARK_RAN" tableExists guard on a table only
+         CRG creates could never fire, and a guard that cannot fire is not free. It
+         would silently SKIP the create on the day the assumption stopped holding,
+         turning a loud startup failure into a table that is quietly missing.
+
+         CRG NO LONGER MINTS ITS READ SOURCES. The pre-v1 changelog bootstrap-created
+         nine relations it does not own, so that a clock-launched report window could
+         run before the writers had ever executed: tx_header and tx_entry (CRR owns
+         them, R-04 single writer), validation_log (CTV), isr_resp / sbsr_resp /
+         pbsr_resp (CIX / CSX / CPX) and crw_emission_group / crw_emission /
+         crw_emission_member (CRW). A reader minting the writer's schema is the exact
+         shared-table coupling this cleanout exists to remove, and at v1 it is no
+         longer merely untidy: the owners' v1 baselines create those tables UNGUARDED,
+         so a CRG mint that won the race would make every owner crashloop on "relation
+         already exists". Worse, the mint had already drifted. CRR's v1 tx_entry
+         carries content_hash and idx_tx_entry_arrival_content_hash; the copy CRG was
+         minting had neither, so on any ordering where CRG went first the fleet would
+         have run on a silently wrong tx_entry.
+
+         The consequence is an ORDERING CONTRACT, and it is stated here rather than
+         left to be discovered: CRG's migration must run AFTER the writers'. Part 4's
+         views and the ix_prg_* indexes below name relations CRG does not own, and
+         both a CREATE VIEW and a CREATE INDEX resolve their target when they are
+         created, not when they are used. On a fresh database, CRG migrating first now
+         fails loudly and immediately, which is the correct failure: it names the
+         missing table instead of inventing one.
+
+         TABLE NAMES keep the prg_ prefix (prg_report, prg_status_class,
+         prg_delivery_ledger, prg_watermark, and the ix_prg_* indexes) even though the
+         service is now CRG. shared/rpt reads prg_report and prg_watermark heavily and
+         is owned elsewhere, so renaming them is a separate change that needs the rpt
+         owner. This is recorded rather than silently carried.
+
+         ONE column is renamed, and this baseline is the only moment it is free.
+         prg_report.report_type becomes prg_report.type: a column never repeats its
+         own host table's name, and report_type inside prg_report says the noun twice.
+         The payments sibling already ships the corrected spelling and cites this
+         column as the violation. trigger_kind, window_key, file_name and job_name do
+         not repeat the table name and are unchanged. report_id on
+         prg_delivery_ledger names the TARGET aggregate rather than its host, which is
+         the documented exemption, so it is unchanged too.
+         ============================================================================ -->
+
+    <!-- Single-writer delta watermark (R-04): one row per (client, e2e). The unique
+         key IS the full business identity, so a restarted advance rewrites its own
+         row rather than duplicating it. -->
+    <changeSet id="crg-v1-watermark" author="dcre">
+        <createTable tableName="prg_watermark">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="client" type="VARCHAR(16)"><constraints nullable="false"/></column>
+            <column name="e2e" type="VARCHAR(35)"><constraints nullable="false"/></column>
+            <column name="last_status" type="VARCHAR(32)"><constraints nullable="false"/></column>
+            <column name="version" type="BIGINT" defaultValueNumeric="0"><constraints nullable="false"/></column>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint tableName="prg_watermark" columnNames="client, e2e"
+                             constraintName="uq_prg_watermark_client_e2e"/>
+        <rollback>
+            <dropTable tableName="prg_watermark"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Report registry: one row per emitted artifact, append-only (no version /
+         updated_at), so the entity rides Persistable rather than the version-based
+         new-ness heuristic. file_name is unique and is the restart no-op key.
+         job_name is the clock-scoped trace anchor rpt v_flow_trace joins against
+         agt_ops.launch_intent.job_name; VARCHAR(63) matches that seam contract. -->
+    <changeSet id="crg-v1-report" author="dcre">
+        <createTable tableName="prg_report">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="client" type="VARCHAR(16)"><constraints nullable="false"/></column>
+            <column name="type" type="VARCHAR(12)"><constraints nullable="false"/></column>
+            <column name="trigger_kind" type="VARCHAR(16)"><constraints nullable="false"/></column>
+            <column name="window_key" type="VARCHAR(64)"><constraints nullable="false"/></column>
+            <column name="parent_source_msg_id" type="VARCHAR(35)"/>
+            <column name="file_name" type="VARCHAR(128)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <column name="job_name" type="VARCHAR(63)"/>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex tableName="prg_report" indexName="ix_prg_report_job">
+            <column name="job_name"/>
+        </createIndex>
+        <rollback>
+            <dropTable tableName="prg_report"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Delivery ledger: every (client, e2e, status) tuple CRG has actually reported.
+         uq_ledger_auto is the auto-send guard and excludes manual rows, so a manual
+         override bypasses the guard while still being ledgered for audit. -->
+    <changeSet id="crg-v1-delivery-ledger" author="dcre">
+        <createTable tableName="prg_delivery_ledger">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="report_id" type="UUID"><constraints nullable="false"/></column>
+            <column name="client" type="VARCHAR(16)"><constraints nullable="false"/></column>
+            <column name="e2e" type="VARCHAR(35)"><constraints nullable="false"/></column>
+            <column name="status" type="VARCHAR(32)"><constraints nullable="false"/></column>
+            <column name="manual_ref" type="VARCHAR(64)"/>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex tableName="prg_delivery_ledger" indexName="ix_ledger_report">
+            <column name="report_id"/>
+        </createIndex>
+        <rollback>
+            <dropTable tableName="prg_delivery_ledger"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ledger-auto-guard" author="dcre">
+        <!-- LIQUIBASE-SQL-EXCEPTION: a PARTIAL unique index (WHERE predicate) has no
+             typed Liquibase tag. The predicate is the point of the index: manual
+             overrides must bypass the auto-send guard. -->
+        <sql>CREATE UNIQUE INDEX uq_ledger_auto ON prg_delivery_ledger (client, e2e, status) WHERE manual_ref IS NULL;</sql>
+        <rollback>
+            <dropIndex tableName="prg_delivery_ledger" indexName="uq_ledger_auto"/>
+        </rollback>
+    </changeSet>
+
+    <!-- CRG-owned read indexes on relations OWNED BY OTHER SERVICES. CRG creates the
+         index but not the table, which is deliberate: the index exists purely for
+         CRG's projection stack and no other service would know to keep it. They are
+         named ix_prg_* so their owner is unambiguous on a shared database, and they
+         are the reason part 2 must run after the writers have created their tables.
+
+         They exist for the set-based projection stack in part 4: one window pass per
+         response table plus
+         hash joins, replacing a correlated per-row probe that executed as nested-loop
+         lookups and hung a live trigger scan for over seven minutes on a 12,001-tx
+         parent. Named ix_prg_* so their owner is unambiguous on a shared database. -->
+    <changeSet id="crg-v1-ix-isr-emission-e2e-created" author="dcre">
+        <createIndex tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created">
+            <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ix-sbsr-emission-e2e-created" author="dcre">
+        <createIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created">
+            <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ix-pbsr-emission-e2e-created" author="dcre">
+        <createIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created">
+            <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ix-isr-orgnl-e2e" author="dcre">
+        <createIndex tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e">
+            <column name="orgnl_msg_id"/><column name="e2e"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ix-sbsr-orgnl-e2e" author="dcre">
+        <createIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e">
+            <column name="orgnl_msg_id"/><column name="e2e"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ix-pbsr-orgnl-e2e" author="dcre">
+        <createIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e">
+            <column name="orgnl_msg_id"/><column name="e2e"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-ix-emission-group" author="dcre">
+        <createIndex tableName="crw_emission" indexName="ix_prg_emission_group">
+            <column name="group_id"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="crw_emission" indexName="ix_prg_emission_group"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

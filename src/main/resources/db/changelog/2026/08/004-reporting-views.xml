@@ -1,0 +1,331 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         CRG v1 BASELINE, part 4 of 4: the status projection and operational views.
+
+         THIS IS THE VERSION 1 BASELINE. Every DCRE database is dropped and recreated
+         at the v1 cutover, so each view is stated ONCE in its final form and created
+         exactly once, in dependency order. Everything the previous changelogs carried
+         to survive an in-place upgrade is gone, and its absence is deliberate:
+
+           - no viewExists MARK_RAN drop-then-recreate pairs. Three of them existed
+             because CockroachDB cannot reorder a view's columns through CREATE OR
+             REPLACE while dependents hold it, so the old definition had to be dropped
+             first. On an empty schema there is no old definition, and a drop guarded
+             on a view that cannot exist is dead weight.
+           - no replaceIfExists, and no runOnChange. A view that is created once needs
+             neither. Both attributes exist to REVISE a definition already applied
+             somewhere, and keeping them on a baseline invites editing this file
+             instead of adding the next changeset, which is how an applied changeset
+             stops being immutable.
+           - no second, superseding definition of a view. prg_report_due and
+             prg_sla_pending were each defined twice, the later file re-owning the
+             body to add a predicate the earlier one could not reference yet. Each
+             now has ONE definition: the settled one. Both later predicates are
+             present, so a reader no longer has to know which file won.
+
+         ORDERING IS THE CONTRACT here, not a convenience, and it runs in two
+         directions. Within this file: the three pick views feed ext_tx_status and
+         prg_member_status; prg_member_status feeds prg_report_due and
+         prg_sla_pending; ext_tx_status feeds prg_status_exception. Across the family:
+         every view below reads relations CRG does NOT own (tx_header and tx_entry
+         from CRR, validation_log from CTV, isr_resp / sbsr_resp / pbsr_resp from
+         CIX / CSX / CPX, crw_emission* from CRW), and CRG no longer mints any of
+         them. CockroachDB resolves a view body at CREATE time, so on a fresh database
+         CRG's migration must run after those writers'. If it does not, this file
+         fails loudly and names the missing relation, which is strictly better than
+         the previous behaviour of inventing a table and drifting from its owner.
+
+         man_collection_outcome is NOT here. It was a MANDATES view created by a
+         collections changelog: mandates/mrg reads it and no collections code does.
+         Removed from collections entirely rather than rehomed, because the mandates
+         family is owned elsewhere.
+         ============================================================================ -->
+
+    <!-- Latest-row pick per (emission, e2e) per response table, one window pass each.
+         A resolved row (one carrying emission_id) outranks every legacy twin, since
+         resolved DESC sorts first; then newest created_at, with response_file as the
+         deterministic tiebreaker so two rows of the same instant cannot alternate.
+         Rows with no emission_id bind through the globally unique outbound identity
+         (orgnl_msg_id = crw_emission.outbound_msg_id). The set-based shape is load
+         bearing: the correlated per-row form it replaced executed as nested-loop
+         lookups and hung a live trigger scan for over seven minutes. -->
+    <changeSet id="crg-v1-isr-pick-view" author="dcre">
+        <createView viewName="prg_isr_pick"><![CDATA[
+            SELECT u.emission_id, u.e2e, u.status
+            FROM (SELECT c.emission_id, c.e2e, c.status,
+                         row_number() OVER (PARTITION BY c.emission_id, c.e2e
+                                            ORDER BY c.resolved DESC, c.created_at DESC,
+                                                     c.response_file DESC) AS pick_rank
+                  FROM (SELECT r.emission_id, r.e2e, r.status, true AS resolved,
+                               r.created_at, r.response_file
+                        FROM isr_resp r
+                        WHERE r.emission_id IS NOT NULL
+                        UNION ALL
+                        SELECT em.id, r.e2e, r.status, false, r.created_at, r.response_file
+                        FROM isr_resp r
+                        JOIN crw_emission em ON em.outbound_msg_id = r.orgnl_msg_id
+                        WHERE r.emission_id IS NULL) AS c) AS u
+            WHERE u.pick_rank = 1
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_isr_pick"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-sbsr-pick-view" author="dcre">
+        <createView viewName="prg_sbsr_pick"><![CDATA[
+            SELECT u.emission_id, u.e2e, u.status
+            FROM (SELECT c.emission_id, c.e2e, c.status,
+                         row_number() OVER (PARTITION BY c.emission_id, c.e2e
+                                            ORDER BY c.resolved DESC, c.created_at DESC,
+                                                     c.response_file DESC) AS pick_rank
+                  FROM (SELECT r.emission_id, r.e2e, r.status, true AS resolved,
+                               r.created_at, r.response_file
+                        FROM sbsr_resp r
+                        WHERE r.emission_id IS NOT NULL
+                        UNION ALL
+                        SELECT em.id, r.e2e, r.status, false, r.created_at, r.response_file
+                        FROM sbsr_resp r
+                        JOIN crw_emission em ON em.outbound_msg_id = r.orgnl_msg_id
+                        WHERE r.emission_id IS NULL) AS c) AS u
+            WHERE u.pick_rank = 1
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_sbsr_pick"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="crg-v1-pbsr-pick-view" author="dcre">
+        <createView viewName="prg_pbsr_pick"><![CDATA[
+            SELECT u.emission_id, u.e2e, u.status
+            FROM (SELECT c.emission_id, c.e2e, c.status,
+                         row_number() OVER (PARTITION BY c.emission_id, c.e2e
+                                            ORDER BY c.resolved DESC, c.created_at DESC,
+                                                     c.response_file DESC) AS pick_rank
+                  FROM (SELECT r.emission_id, r.e2e, r.status, true AS resolved,
+                               r.created_at, r.response_file
+                        FROM pbsr_resp r
+                        WHERE r.emission_id IS NOT NULL
+                        UNION ALL
+                        SELECT em.id, r.e2e, r.status, false, r.created_at, r.response_file
+                        FROM pbsr_resp r
+                        JOIN crw_emission em ON em.outbound_msg_id = r.orgnl_msg_id
+                        WHERE r.emission_id IS NULL) AS c) AS u
+            WHERE u.pick_rank = 1
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_pbsr_pick"/>
+        </rollback>
+    </changeSet>
+
+    <!-- The single status-projection authority, one row per tx_entry. Deepest
+         response leg wins (PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with
+         no response yet projects as CTV_PASS and a FAIL projects its outcome
+         verbatim. Batch-scoped: the three pick joins are keyed on the tx line's OWN
+         emission, so one e2e recurring across arrivals cannot borrow the other
+         arrival's status. The *_fam arms are the fallback for an arrival that has no
+         emission AT ALL, matched inside the parent identity family (the parent MsgId
+         or a split child MsgId_N) with its own per-(family, e2e) latest-row pick. -->
+    <changeSet id="crg-v1-ext-tx-status-view" author="dcre">
+        <createView viewName="ext_tx_status"><![CDATA[
+            WITH member_emission AS (
+                    SELECT m.sequence, e.arrival_id, e.id AS emission_id, e.group_id,
+                           e.outbound_msg_id
+                    FROM crw_emission_member m
+                    JOIN crw_emission e ON e.id = m.emission_id
+            ),
+            isr_fam AS (
+                    SELECT h2.arrival_id, r.e2e, r.status,
+                           row_number() OVER (PARTITION BY h2.arrival_id, r.e2e
+                                              ORDER BY r.created_at DESC,
+                                                       r.response_file DESC) AS rn
+                    FROM isr_resp r
+                    JOIN tx_header h2 ON r.orgnl_msg_id = h2.msg_id
+                                      OR r.orgnl_msg_id LIKE h2.msg_id || '\_%'
+                    WHERE r.emission_id IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM crw_emission pe
+                                      WHERE pe.arrival_id = h2.arrival_id)
+            ),
+            sbsr_fam AS (
+                    SELECT h2.arrival_id, r.e2e, r.status,
+                           row_number() OVER (PARTITION BY h2.arrival_id, r.e2e
+                                              ORDER BY r.created_at DESC,
+                                                       r.response_file DESC) AS rn
+                    FROM sbsr_resp r
+                    JOIN tx_header h2 ON r.orgnl_msg_id = h2.msg_id
+                                      OR r.orgnl_msg_id LIKE h2.msg_id || '\_%'
+                    WHERE r.emission_id IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM crw_emission pe
+                                      WHERE pe.arrival_id = h2.arrival_id)
+            ),
+            pbsr_fam AS (
+                    SELECT h2.arrival_id, r.e2e, r.status,
+                           row_number() OVER (PARTITION BY h2.arrival_id, r.e2e
+                                              ORDER BY r.created_at DESC,
+                                                       r.response_file DESC) AS rn
+                    FROM pbsr_resp r
+                    JOIN tx_header h2 ON r.orgnl_msg_id = h2.msg_id
+                                      OR r.orgnl_msg_id LIKE h2.msg_id || '\_%'
+                    WHERE r.emission_id IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM crw_emission pe
+                                      WHERE pe.arrival_id = h2.arrival_id)
+            )
+            SELECT t.arrival_id, t.sequence, t.e2e, h.client_token AS client,
+                   me.outbound_msg_id, me.emission_id, g.source_msg_id,
+                   COALESCE(pp.status, pf.status, sp.status, sf.status, ip.status, ifm.status,
+                            CASE WHEN v.outcome = 'PASS' THEN 'CTV_PASS' ELSE v.outcome END) AS status,
+                   COALESCE(sc.terminal, false) AS terminal,
+                   CASE WHEN COALESCE(pp.status, pf.status) IS NOT NULL THEN 4
+                        WHEN COALESCE(sp.status, sf.status) IS NOT NULL THEN 3
+                        WHEN COALESCE(ip.status, ifm.status) IS NOT NULL THEN 2
+                        ELSE 1 END AS stage_rank
+            FROM tx_entry t
+            JOIN tx_header h ON h.arrival_id = t.arrival_id
+            LEFT JOIN validation_log v ON v.arrival_id = t.arrival_id AND v.sequence = t.sequence
+            LEFT JOIN member_emission me ON me.arrival_id = t.arrival_id AND me.sequence = t.sequence
+            LEFT JOIN crw_emission_group g ON g.id = me.group_id
+            LEFT JOIN prg_isr_pick  ip ON ip.emission_id = me.emission_id AND ip.e2e = t.e2e
+            LEFT JOIN prg_sbsr_pick sp ON sp.emission_id = me.emission_id AND sp.e2e = t.e2e
+            LEFT JOIN prg_pbsr_pick pp ON pp.emission_id = me.emission_id AND pp.e2e = t.e2e
+            LEFT JOIN isr_fam  ifm ON ifm.arrival_id = t.arrival_id AND ifm.e2e = t.e2e AND ifm.rn = 1
+            LEFT JOIN sbsr_fam sf  ON sf.arrival_id  = t.arrival_id AND sf.e2e  = t.e2e AND sf.rn  = 1
+            LEFT JOIN pbsr_fam pf  ON pf.arrival_id  = t.arrival_id AND pf.e2e  = t.e2e AND pf.rn  = 1
+            LEFT JOIN prg_status_class sc
+                   ON sc.code = COALESCE(pp.status, pf.status, sp.status, sf.status, ip.status, ifm.status)
+        ]]></createView>
+        <rollback>
+            <dropView viewName="ext_tx_status"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Member-grain current status: one row per crw_emission_member, over BOUNDED
+         indexed paths only (member to emission PK to group PK, tx and validation via
+         their (arrival_id, sequence) unique keys, responses via the pick views). The
+         due and SLA views read THIS rather than re-aggregating the tx-grain stack.
+         The no-emission family fallback is irrelevant here by construction: a member
+         row proves the emission exists. -->
+    <changeSet id="crg-v1-member-status-view" author="dcre">
+        <createView viewName="prg_member_status"><![CDATA[
+            SELECT em.group_id, g.client, g.source_msg_id, m.emission_id, t.e2e,
+                   COALESCE(pp.status, sp.status, ip.status,
+                            CASE WHEN v.outcome = 'PASS' THEN 'CTV_PASS' ELSE v.outcome END) AS status,
+                   COALESCE(sc.terminal, false) AS terminal
+            FROM crw_emission_member m
+            JOIN crw_emission em ON em.id = m.emission_id
+            JOIN crw_emission_group g ON g.id = em.group_id
+            JOIN tx_entry t ON t.arrival_id = em.arrival_id AND t.sequence = m.sequence
+            LEFT JOIN validation_log v ON v.arrival_id = em.arrival_id AND v.sequence = m.sequence
+            LEFT JOIN prg_isr_pick  ip ON ip.emission_id = m.emission_id AND ip.e2e = t.e2e
+            LEFT JOIN prg_sbsr_pick sp ON sp.emission_id = m.emission_id AND sp.e2e = t.e2e
+            LEFT JOIN prg_pbsr_pick pp ON pp.emission_id = m.emission_id AND pp.e2e = t.e2e
+            LEFT JOIN prg_status_class sc ON sc.code = COALESCE(pp.status, sp.status, ip.status)
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_member_status"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Due parents for the clock trigger scan. COMPLETE = every member of every
+         batch of the parent is terminal, and reports immediately. IDLE = the newest
+         batch-correlated response is older than the 120s debounce; zero responses
+         means the debounce never started, which is NOT due. Both require at least one
+         (client, e2e, status) tuple absent from the automatic ledger rows, and only
+         REPORTABLE statuses count toward that: an unsupported-only parent must not
+         become IDLE-due forever while the writer is forbidden from emitting it.
+         CTV_PASS is reportable by definition and carries no catalogue row.
+
+         Completeness is derived from crw_emission_group.total_tx against a terminal
+         member count aggregated ONCE over prg_member_status, and the unreported delta
+         is a hash left-anti join on the uq_ledger_auto tuple. Never reintroduce a
+         per-parent correlated scan of the ext_tx_status stack here: that exact shape
+         hung the live trigger scan for over seven minutes on a 12,001-tx parent. -->
+    <changeSet id="crg-v1-report-due-view" author="dcre">
+        <createView viewName="prg_report_due"><![CDATA[
+            WITH member_state AS (
+                    SELECT ms.group_id,
+                           count(*) FILTER (WHERE ms.terminal) AS terminal_members,
+                           count(*) FILTER (WHERE ms.status IS NOT NULL
+                                              AND (ms.status = 'CTV_PASS'
+                                                   OR COALESCE(sc.reportable, false))
+                                              AND l.e2e IS NULL) AS unreported
+                    FROM prg_member_status ms
+                    LEFT JOIN prg_status_class sc ON sc.code = ms.status
+                    LEFT JOIN prg_delivery_ledger l
+                           ON l.client = ms.client AND l.e2e = ms.e2e
+                          AND l.status = ms.status AND l.manual_ref IS NULL
+                    GROUP BY ms.group_id
+            ),
+            last_response AS (
+                    SELECT e.group_id, max(r.updated_at) AS newest
+                    FROM (SELECT emission_id, updated_at FROM isr_resp
+                          WHERE emission_id IS NOT NULL
+                          UNION ALL SELECT emission_id, updated_at FROM sbsr_resp
+                          WHERE emission_id IS NOT NULL
+                          UNION ALL SELECT emission_id, updated_at FROM pbsr_resp
+                          WHERE emission_id IS NOT NULL) r
+                    JOIN crw_emission e ON e.id = r.emission_id
+                    GROUP BY e.group_id
+            )
+            SELECT g.client, g.source_msg_id,
+                   CASE WHEN s.terminal_members = g.total_tx THEN 'COMPLETE' ELSE 'IDLE' END AS reason
+            FROM crw_emission_group g
+            JOIN member_state s ON s.group_id = g.id
+            LEFT JOIN last_response lr ON lr.group_id = g.id
+            WHERE s.unreported > 0
+              AND (s.terminal_members = g.total_tx
+                   OR (lr.newest IS NOT NULL AND lr.newest < now() - INTERVAL '120 seconds'))
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_report_due"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Members of a VISIBLE outbound batch whose current status is not terminal, aged
+         in hours for the 20h/24h SLA path. A status marked sla_suppressed has already
+         had its response (accepted warehoused interim), so it must not age here even
+         though it is non-terminal. -->
+    <changeSet id="crg-v1-sla-pending-view" author="dcre">
+        <createView viewName="prg_sla_pending"><![CDATA[
+            SELECT ms.client, ms.e2e, em.outbound_msg_id, em.visible_at,
+                   EXTRACT(EPOCH FROM (now() - em.visible_at)) / 3600 AS age_hours
+            FROM prg_member_status ms
+            JOIN crw_emission em ON em.id = ms.emission_id
+            WHERE em.state = 'VISIBLE' AND em.visible_at IS NOT NULL AND NOT ms.terminal
+              AND NOT EXISTS (SELECT 1 FROM prg_status_class sc
+                              WHERE sc.code = ms.status AND sc.sla_suppressed)
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_sla_pending"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Unsupported and unknown Fintegrate response codes, retained raw and exposed
+         for operations but never entering an automatic report. Built from
+         ext_tx_status so its deepest-leg choice and no-emission fallback remain the
+         single projection authority; an unclassified code COALESCEs to UNKNOWN rather
+         than disappearing. -->
+    <changeSet id="crg-v1-status-exception-view" author="dcre">
+        <createView viewName="prg_status_exception"><![CDATA[
+            SELECT x.client::VARCHAR(16) AS client,
+                   COALESCE(x.source_msg_id, h.msg_id)::VARCHAR(35) AS source_msg_id,
+                   x.outbound_msg_id::VARCHAR(64) AS outbound_msg_id,
+                   x.e2e::VARCHAR(35) AS e2e, x.status::VARCHAR(32) AS status,
+                   COALESCE(sc.classification, 'UNKNOWN')::VARCHAR(32) AS classification
+            FROM ext_tx_status x
+            JOIN tx_header h ON h.arrival_id = x.arrival_id
+            LEFT JOIN prg_status_class sc ON sc.code = x.status
+            WHERE x.status IS NOT NULL AND x.stage_rank > 1
+              AND NOT COALESCE(sc.reportable, false)
+        ]]></createView>
+        <rollback>
+            <dropView viewName="prg_status_exception"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

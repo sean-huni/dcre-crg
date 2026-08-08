@@ -12,49 +12,32 @@ ENDO Payments flow gets its own report generator, `prg`, in the payments family 
 the SOLID violation the family split exists to remove; the collections/payments sheets in
 `design-register/docs/diagrams/` are the specification.
 
-### SCRUM-107: renamed from `prg`, database objects deliberately NOT renamed
+### SCRUM-107: renamed from `prg`; table names stay, the migration history moves
 
 This repository was `dcre-prg` (see `dcre-prg-legacy` for the archive). The rename covers the CODE,
-the package, the artifact, the config prefix, the changeset identities and the Spring Batch table
-prefix. It does **not** touch a single database table, view, index or column: `prg_watermark`,
-`prg_report`, `prg_delivery_ledger`, `prg_status_class` and the seven `prg_*` views keep their
-names, and neither does the Liquibase history table.
+the package, the artifact, the config prefix, the changeset identities, the Spring Batch table
+prefix and the Liquibase history tables.
 
-The reason is the watermark. `prg_watermark` is live delta-reporting state, one row per
-(client, e2e). Renaming the table means the new one starts empty, which means the next window
-treats every transaction in the book as unreported and re-emits the entire history as a delta.
-That is a production incident, not a tidy-up, and the data question is routed separately. Class
+It does **not** rename the DATA tables. `prg_watermark`, `prg_report`, `prg_delivery_ledger`,
+`prg_status_class` and the `prg_*` views keep their names, for one reason: `shared/rpt` reads
+`prg_report` and `prg_watermark` heavily and is owned elsewhere. Renaming them is a separate change
+that needs the rpt owner, and it is recorded as a follow-up rather than carried silently. Class
 names follow the SERVICE (`CrgReportEntity`) while `@Table` values follow the SCHEMA
 (`@Table("prg_report")`), per the estate rule that a `@Table` value never changes with a class
 rename.
 
-`[!CONVENTION-OVERRIDE]` The Liquibase history table stays `prg_databasechangelog` too, which
-deviates from the MAF -> MAS and MIS -> MIT playbook. Those services renamed theirs; this one
-cannot, and the difference is that they had eight guarded changesets while this one has 53
-including three v1 view drops that only ever ran before the dependent views existed. A history
-table IS the migration state, so a renamed one presents an EMPTY history to a fully-built
-`dcre_col` and replays everything. Measured, not argued:
+The Liquibase history tables DO rename, to `crg_databasechangelog`(+lock). An earlier revision kept
+them as `prg_*` under a `[!CONVENTION-OVERRIDE]`, because a history table IS the migration state
+and renaming it would have presented an empty history to a fully built `dcre_col` and replayed all
+53 changesets. That obstacle is gone: every DCRE database is dropped and recreated at the v1
+cutover, so there is no history to preserve and no replay to survive. The override was retired with
+the condition that produced it.
 
-```
-Migration failed for changeset 003-reporting.xml::003-drop-ext-tx-status-v1::dcre:
-ERROR: cannot drop relation "ext_tx_status" because view "prg_status_exception" depends on it
-```
+One COLUMN is renamed with the v1 baseline: `prg_report.report_type` becomes `prg_report.type`. A
+column never repeats its own host table's name, and a baseline on an empty database is the only
+moment the correction is free. The payments sibling already ships the corrected spelling.
 
-CRG would crash-loop on startup against the live database. The rename also buys nothing: a
-per-service history table exists to isolate services SHARING a database, these changesets have
-exactly one owner either way, and the payments PRG lives in `dcre_pay`, so its own
-`prg_databasechangelog` can never collide with this one.
-`LegacyUpgradeIT.renamingTheHistoryTableWouldReplayTheChangelogAndFail` pins that failure so the
-reason is executable rather than a comment somebody deletes.
-
-The Spring Batch prefix DOES rename to `CRG_BATCH_`, because that path is additive rather than a
-replay: `batch-metadata-crg.sql` creates its tables `IF NOT EXISTS` and nothing re-evaluates. The
-consequence is that the existing `PRG_BATCH_*` job metadata is orphaned, not migrated, so a window
-that was FAILED mid-flight at cutover starts as a fresh `JobInstance` instead of resuming. That is
-safe here rather than merely tolerable: `prg_delivery_ledger` and `prg_watermark` are the
-full-identity idempotency guards and both are retained, so a re-run of an already-reported window
-is a no-op, not a duplicate emission. AGT also only ever launches the CURRENT window, so no
-historic window is re-launched.
+The Spring Batch prefix is `CRG_BATCH_`.
 
 ## Architecture and principles
 
@@ -75,7 +58,7 @@ historic window is re-launched.
 - Accepted warehoused (SLA-suppressed): `ACWP` future-dated, `ACWC` auto-bumped per the RMB
   DebiCheck profile.
 
-Accepted warehoused codes (SCRUM-68, migration `2026/07/005`) are reportable non-terminal
+Accepted warehoused codes (SCRUM-68) are reportable non-terminal
 statuses: the transaction has its response, so it enters PSRs normally, but it is suppressed from
 the 20h/24h pending-SLA path via `prg_status_class.sla_suppressed` (`prg_sla_pending` excludes
 suppressed codes; otherwise every future-dated collection would false-amber).
@@ -114,16 +97,34 @@ END|0
 
 ### Database and batch metadata
 
-Liquibase with per-service history tables on the shared `dcre_col` DB. The history tables are `prg_databasechangelog` / `prg_databasechangeloglock`, deliberately NOT renamed with the service: see "SCRUM-107" above and the `[!CONVENTION-OVERRIDE]` in `application.yml`.
+Liquibase with per-service history tables (`crg_databasechangelog` / `crg_databasechangeloglock`)
+on the shared `dcre_col` database. The changelog is a VERSION 1 BASELINE: the pre-v1 changelogs
+under `2026/07` are gone rather than superseded, because the database is dropped and recreated at
+the cutover, so there is no history for them to be consistent with. The root master includes the
+MONTH sub-master, never individual changesets.
 
+1. `2026/08/001-batch-metadata.xml`: Spring Batch 6.0.4 job-repository metadata under prefix
+   `CRG_BATCH_`, pure typed tags (no external SQL file, so no ANY-checksum override).
+2. `2026/08/002-reporting-tables.xml`: the tables CRG OWNS (`prg_watermark`, `prg_report`,
+   `prg_delivery_ledger`, the `uq_ledger_auto` partial unique guard) plus the CRG-owned `ix_prg_*`
+   read indexes.
+3. `2026/08/003-status-classification.xml`: `prg_status_class` and all fourteen recognised codes,
+   stated once in their settled form.
+4. `2026/08/004-reporting-views.xml`: the pick views, `ext_tx_status`, `prg_member_status`,
+   `prg_report_due`, `prg_sla_pending` and `prg_status_exception`, each defined exactly once.
 
-1. `2026/07/001-crg.xml` changeSet 001: BOOTSTRAP-ORDER GUARD. CRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
-2. ChangeSet 002: `ext_tx_status` view, deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
-3. `2026/07/003-reporting.xml`: split-response correlation views, `prg_status_class`, report registry, delivery ledger, due/SLA views and the batch-scoped `ext_tx_status` replacement.
-4. `2026/07/004-status-classification.xml`: five-way classification for all fourteen recognised statuses, historical unsupported rows for `ACWC`/`ACWP` (corrected by 005), automatic-report suppression and `prg_status_exception`.
-5. `2026/07/004-crg-report-jobname.xml`: nullable `prg_report.job_name` + `ix_prg_report_job` (SCRUM-58), the clock-scoped file-trace join anchor for rpt `v_flow_trace` via `agt_ops.launch_intent.job_name`.
-6. `2026/07/005-warehoused-interim.xml`: SCRUM-68 reclassifies `ACWC`/`ACWP` as accepted warehoused interim (reportable, `sla_suppressed`) per the RMB DebiCheck profile and re-owns `prg_sla_pending` with the suppression predicate (later-owner pattern).
-7. `2026/07/002-batch-metadata.xml` -> `batch-metadata-crg.sql`: Spring Batch metadata under prefix `CRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
+**CRG no longer creates its read sources, and that is an ordering contract.** The pre-v1 changelog
+bootstrap-minted nine relations CRG does not own, so a clock-launched window could run before the
+writers had ever executed: `tx_header` and `tx_entry` (CRR), `validation_log` (CTV), `isr_resp` /
+`sbsr_resp` / `pbsr_resp` (CIX / CSX / CPX), and `crw_emission_group` / `crw_emission` /
+`crw_emission_member` (CRW). At v1 the owners create those tables unguarded, so a CRG mint that won
+the race would crashloop the owner on "relation already exists"; the mint had also already drifted,
+missing CRR's `content_hash` column and its index. CRG's migration must therefore run AFTER the
+writers'. A CREATE VIEW and a CREATE INDEX both resolve their target at creation time, so running
+too early now fails immediately and names the missing relation instead of inventing one.
+
+Integration tests stand the read sources up from `src/test/resources/db/changelog/test/001-read-sources.xml`,
+reached through `db.changelog-test-master.xml`, which then runs the production master unchanged.
 
 ### Platform library dependencies (mavenLocal, 0.1.0)
 
@@ -167,10 +168,9 @@ Precedence: yml default < environment variable. All defaults are committed in `a
 | `DCRE_CRG_PSR_SLICE_SIZE` | `50000` | Keyset slice size for reads, streaming emission and watermark advances |
 | `DCRE_AMOUNT_SCALE` | `2` | Fleet-wide flag; not read by CRG sources |
 | `DCRE_V1_ENABLED` | `false` | Fleet-wide flag; not read by CRG sources |
-| `DCRE_FLOW_DC` | `true` | Fleet-wide flag; not read by CRG sources |
 | `JOB_NAME` | `local-<executionId>` | K8s-injected identity for the outcome seam |
 
-Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpath resource (shipped in `platform-batch`, imported via `spring.config.import`); Batch metadata uses table prefix `CRG_BATCH_`; Liquibase history lives in `prg_databasechangelog`(+lock), retained under the CRG name.
+Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpath resource (shipped in `platform-batch`, imported via `spring.config.import`); Batch metadata uses table prefix `CRG_BATCH_`; Liquibase history lives in `crg_databasechangelog`(+lock).
 
 ## Testing
 
