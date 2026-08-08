@@ -1,16 +1,66 @@
-# dcre-prg
+# dcre-crg
 
 PSR Generator: clock-windowed status reporter, the terminal stage of the DCRE response leg.
 
 ## What it does
 
-PRG projects per-transaction external status (the `ext_tx_status` view over spine + validation + ISR/SBSR/PBSR response legs, deepest leg wins per R-17) and emits delta Payment Status Report (PSR) files per client on clock windows. Each run diffs `ext_tx_status` against the `prg_watermark` table for one client, streams the delta as a PSR flat file into the client's `onhost-resp/out` exchange directory, then advances the watermark in bounded slices. It is not file-triggered: AGT's clock instantiates `prgJob` per (client, window) as a short-lived Kubernetes Job, and PRG reports whatever `ext_tx_status` holds behind the watermark, serving the DC Collections and ENDO Payments flows alike.
+CRG projects per-transaction external status (the `ext_tx_status` view over spine + validation + ISR/SBSR/PBSR response legs, deepest leg wins per R-17) and emits delta Payment Status Report (PSR) files per client on clock windows. Each run diffs `ext_tx_status` against the `prg_watermark` table for one client, streams the delta as a PSR flat file into the client's `onhost-resp/out` exchange directory, then advances the watermark in bounded slices. It is not file-triggered: AGT's clock instantiates `crgJob` per (client, window) as a short-lived Kubernetes Job, and CRG reports whatever `ext_tx_status` holds behind the watermark.
+
+**CRG serves the DC Collections flow only.** It reads and writes `dcre_col` and nothing else. The
+ENDO Payments flow gets its own report generator, `prg`, in the payments family against `dcre_pay`
+(SCRUM-107). The single-service-for-both-flows arrangement this repo carried until SCRUM-107 was
+the SOLID violation the family split exists to remove; the collections/payments sheets in
+`design-register/docs/diagrams/` are the specification.
+
+### SCRUM-107: renamed from `prg`, database objects deliberately NOT renamed
+
+This repository was `dcre-prg` (see `dcre-prg-legacy` for the archive). The rename covers the CODE,
+the package, the artifact, the config prefix, the changeset identities and the Spring Batch table
+prefix. It does **not** touch a single database table, view, index or column: `prg_watermark`,
+`prg_report`, `prg_delivery_ledger`, `prg_status_class` and the seven `prg_*` views keep their
+names, and neither does the Liquibase history table.
+
+The reason is the watermark. `prg_watermark` is live delta-reporting state, one row per
+(client, e2e). Renaming the table means the new one starts empty, which means the next window
+treats every transaction in the book as unreported and re-emits the entire history as a delta.
+That is a production incident, not a tidy-up, and the data question is routed separately. Class
+names follow the SERVICE (`CrgReportEntity`) while `@Table` values follow the SCHEMA
+(`@Table("prg_report")`), per the estate rule that a `@Table` value never changes with a class
+rename.
+
+`[!CONVENTION-OVERRIDE]` The Liquibase history table stays `prg_databasechangelog` too, which
+deviates from the MAF -> MAS and MIS -> MIT playbook. Those services renamed theirs; this one
+cannot, and the difference is that they had eight guarded changesets while this one has 53
+including three v1 view drops that only ever ran before the dependent views existed. A history
+table IS the migration state, so a renamed one presents an EMPTY history to a fully-built
+`dcre_col` and replays everything. Measured, not argued:
+
+```
+Migration failed for changeset 003-reporting.xml::003-drop-ext-tx-status-v1::dcre:
+ERROR: cannot drop relation "ext_tx_status" because view "prg_status_exception" depends on it
+```
+
+CRG would crash-loop on startup against the live database. The rename also buys nothing: a
+per-service history table exists to isolate services SHARING a database, these changesets have
+exactly one owner either way, and the payments PRG lives in `dcre_pay`, so its own
+`prg_databasechangelog` can never collide with this one.
+`LegacyUpgradeIT.renamingTheHistoryTableWouldReplayTheChangelogAndFail` pins that failure so the
+reason is executable rather than a comment somebody deletes.
+
+The Spring Batch prefix DOES rename to `CRG_BATCH_`, because that path is additive rather than a
+replay: `batch-metadata-crg.sql` creates its tables `IF NOT EXISTS` and nothing re-evaluates. The
+consequence is that the existing `PRG_BATCH_*` job metadata is orphaned, not migrated, so a window
+that was FAILED mid-flight at cutover starts as a fresh `JobInstance` instead of resuming. That is
+safe here rather than merely tolerable: `prg_delivery_ledger` and `prg_watermark` are the
+full-identity idempotency guards and both are retained, so a re-run of an already-reported window
+is a no-op, not a duplicate emission. AGT also only ever launches the CURRENT window, so no
+historic window is re-launched.
 
 ## Architecture and principles
 
-- **SOLID, 3-tier**: one responsibility per class along `PsrTasklet` (thin Spring Batch entry adapter) -> `PsrReportService` (business tier) -> `PrgWatermarkRepo` (Spring Data JDBC). Supporting single-purpose units: `StreamedPsrWrite` (staged streaming boundary write), `CrdbRetry` (bounded SQLSTATE 40001 retry), `SeamListener` (outcome seam). Layer-first packages: `config/`, `service/`, `data/model/`, `data/repo/`.
+- **SOLID, 3-tier**: one responsibility per class along `PsrTasklet` (thin Spring Batch entry adapter) -> `PsrReportService` (business tier) -> `CrgWatermarkRepo` (Spring Data JDBC). Supporting single-purpose units: `StreamedPsrWrite` (staged streaming boundary write), `CrdbRetry` (bounded SQLSTATE 40001 retry), `SeamListener` (outcome seam). Layer-first packages: `config/`, `service/`, `data/model/`, `data/repo/`.
 - **12FactorApp Alignment - https://12factor.net/**: config strictly from the environment with committed working dev defaults (a clean clone runs with no `.env`), stateless one-shot process (the JVM exit code carries the Batch verdict via `ExitCodeMain`, R-34), CockroachDB and the exchange directory as attached resources.
-- **Idempotent restart semantics**: job identity is the identifying parameter pair (client, window) (R-16); `resend` is non-identifying. R-29 order: the WHOLE file becomes visible first (streamed tmp + `ATOMIC_MOVE`), then watermarks advance in per-slice `REQUIRES_NEW` transactions. An existing target file is a restart no-op (R-24); a crash between file and watermark replays as skip-existing-file + watermark advance, neither skipping nor duplicating. `StaleExecutionSweeper.abandonStale(ds, "PRG_BATCH_", 60)` runs as an `@Order(-10)` `ApplicationRunner` so a killed pod never strands a STARTED execution (A-39a).
+- **Idempotent restart semantics**: job identity is the identifying parameter pair (client, window) (R-16); `resend` is non-identifying. R-29 order: the WHOLE file becomes visible first (streamed tmp + `ATOMIC_MOVE`), then watermarks advance in per-slice `REQUIRES_NEW` transactions. An existing target file is a restart no-op (R-24); a crash between file and watermark replays as skip-existing-file + watermark advance, neither skipping nor duplicating. `StaleExecutionSweeper.abandonStale(ds, "CRG_BATCH_", 60)` runs as an `@Order(-10)` `ApplicationRunner` so a killed pod never strands a STARTED execution (A-39a).
 - **CRDB-correct upserts**: watermark writes are `INSERT ... ON CONFLICT (client, e2e) DO UPDATE`, never `UPSERT INTO` (CRDB arbitrates UPSERT on the primary key only; the business identity is (client, e2e)). Serialization aborts (40001) retry up to 5 attempts with jittered backoff in a fresh transaction per attempt.
 - **Bounded scale (SCRUM-42)**: whole-book reads plus a full in-heap render blew CRDB's sql memory budget on the 30M-tx book. Every read is now a keyset slice (`ORDER BY e2e LIMIT :limit`, default 50000) and the PSR streams to disk slice by slice; nothing holds more than one slice in heap.
 
@@ -39,17 +89,17 @@ unchanged because it replays the immutable delivery ledger rather than current s
 
 ### Job contract
 
-One job `prgJob`, one tasklet step `psrStep`.
+One job `crgJob`, one tasklet step `psrStep`.
 
-- Scheduled run: delta selection, reportable rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet). Unknown Fintegrate response codes are excluded. Zero delta rows = a zero-valued heartbeat PSR (SCRUM-55, section below) so the consumer can tell "no movement" from "PRG dead".
+- Scheduled run: delta selection, reportable rows whose `ext_tx_status.status` moved past `prg_watermark.last_status` (or have no watermark row yet). Unknown Fintegrate response codes are excluded. Zero delta rows = a zero-valued heartbeat PSR (SCRUM-55, section below) so the consumer can tell "no movement" from "CRG dead".
 - Resend run (`resend=true`, non-identifying): all current reportable-status rows, watermark ignored; re-projects CURRENT state, not the original report (A-8).
-- R-38 exclusion visibility: mid-DAG rows with `status IS NULL` are never reportable. Up to 100 each gets a WARN in the uniform shape `excluded stage=PRG arrival=<uuid> seq=<n> e2e=<e2e> reason=STATUS_UNKNOWN`; above 100 they collapse to one summary WARN per client.
+- R-38 exclusion visibility: mid-DAG rows with `status IS NULL` are never reportable. Up to 100 each gets a WARN in the uniform shape `excluded stage=CRG arrival=<uuid> seq=<n> e2e=<e2e> reason=STATUS_UNKNOWN`; above 100 they collapse to one summary WARN per client.
 - File: `<exchange-root>/<client-base>/onhost-resp/out/<CLIENT>_PSR_<window>.txt`; layout is SYNTHETIC-CONTRACT (R-35): header `PSR|client|window`, one `TX|e2e|status` per row ordered by e2e, trailer `END|count`. An unconfigured client fails the job closed (`IllegalArgumentException` from the layout) rather than writing to a wrong directory.
 - Outcome seam: on COMPLETED, `BUSINESS_ACCEPTED` to `<exchange-root>/outcomes/<JOB_NAME>` (`OutcomeFileWriter`, R-33).
 
 ### SYNTHETIC-CONTRACT: heartbeat layout (SCRUM-55)
 
-A SCHEDULED window with zero delta emits a zero-valued, normal-format PSR instead of no file, so the OnHost consumer can distinguish "no movement" from "PRG dead":
+A SCHEDULED window with zero delta emits a zero-valued, normal-format PSR instead of no file, so the OnHost consumer can distinguish "no movement" from "CRG dead":
 
 ```text
 PSR|<client>|<window>
@@ -64,21 +114,22 @@ END|0
 
 ### Database and batch metadata
 
-Liquibase with per-service history tables (`prg_databasechangelog` / `prg_databasechangeloglock`) on the shared `dcre_col` DB:
+Liquibase with per-service history tables on the shared `dcre_col` DB. The history tables are `prg_databasechangelog` / `prg_databasechangeloglock`, deliberately NOT renamed with the service: see "SCRUM-107" above and the `[!CONVENTION-OVERRIDE]` in `application.yml`.
 
-1. `2026/07/001-prg.xml` changeSet 001: BOOTSTRAP-ORDER GUARD. PRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
+
+1. `2026/07/001-crg.xml` changeSet 001: BOOTSTRAP-ORDER GUARD. CRG is clock-launched and may run on a fresh DB before CRR/CTV and the response readers, so every view source (`tx_header`, `tx_entry`, `validation_log`, `isr_resp`, `sbsr_resp`, `pbsr_resp`) is created `IF NOT EXISTS` with the owners' exact column sets.
 2. ChangeSet 002: `ext_tx_status` view, deepest response leg wins (R-17 stage rank PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet projects as `CTV_PASS`, a FAIL projects its outcome verbatim; client = `tx_header.client_token`.
 3. `2026/07/003-reporting.xml`: split-response correlation views, `prg_status_class`, report registry, delivery ledger, due/SLA views and the batch-scoped `ext_tx_status` replacement.
 4. `2026/07/004-status-classification.xml`: five-way classification for all fourteen recognised statuses, historical unsupported rows for `ACWC`/`ACWP` (corrected by 005), automatic-report suppression and `prg_status_exception`.
-5. `2026/07/004-prg-report-jobname.xml`: nullable `prg_report.job_name` + `ix_prg_report_job` (SCRUM-58), the clock-scoped file-trace join anchor for rpt `v_flow_trace` via `agt_ops.launch_intent.job_name`.
+5. `2026/07/004-crg-report-jobname.xml`: nullable `prg_report.job_name` + `ix_prg_report_job` (SCRUM-58), the clock-scoped file-trace join anchor for rpt `v_flow_trace` via `agt_ops.launch_intent.job_name`.
 6. `2026/07/005-warehoused-interim.xml`: SCRUM-68 reclassifies `ACWC`/`ACWP` as accepted warehoused interim (reportable, `sla_suppressed`) per the RMB DebiCheck profile and re-owns `prg_sla_pending` with the suppression predicate (later-owner pattern).
-7. `2026/07/002-batch-metadata.xml` -> `batch-metadata-prg.sql`: Spring Batch metadata under prefix `PRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
+7. `2026/07/002-batch-metadata.xml` -> `batch-metadata-crg.sql`: Spring Batch metadata under prefix `CRG_BATCH_` (`spring.batch.jdbc.initialize-schema: never`).
 
 ### Platform library dependencies (mavenLocal, 0.1.0)
 
 | Module | Used for |
 |---|---|
-| `za.co.fnb.dcre:platform-persistence` | `BaseEntity` (on `PrgWatermarkEntity`), `JdbcConfig` (imported by `PrgApplication`) |
+| `za.co.fnb.dcre:platform-persistence` | `BaseEntity` (on `CrgWatermarkEntity`), `JdbcConfig` (imported by `CrgApplication`) |
 | `za.co.fnb.dcre:platform-files` | `ExchangeLayout` / `ExchangeChannel` / `ExchangeSub` (per-client exchange resolution, fail-closed) |
 | `za.co.fnb.dcre:platform-batch` | `ExitCodeMain`, `OutcomeFileWriter`, `StaleExecutionSweeper`; ships the `dcre-exchange-layout.yml` classpath resource imported via `spring.config.import` |
 
@@ -97,10 +148,10 @@ Clean clone, no `.env` needed (committed dev defaults):
 ./gradlew build
 
 # one scheduled window against a reachable CockroachDB (defaults: localhost:26257/dcre_col)
-java -jar build/libs/prg-2.0.jar client=FNBRF01 window=w1
+java -jar build/libs/crg-2.0.jar client=FNBRF01 window=w1
 
 # resend override: non-identifying parameter, re-emits all current rows
-java -jar build/libs/prg-2.0.jar client=FNBRF01 window=w1-manual resend=true,java.lang.String,false
+java -jar build/libs/crg-2.0.jar client=FNBRF01 window=w1-manual resend=true,java.lang.String,false
 ```
 
 ## Configuration
@@ -113,13 +164,13 @@ Precedence: yml default < environment variable. All defaults are committed in `a
 | `DCRE_DB_USER` | `root` | DB user |
 | `DCRE_DB_PASSWORD` | (empty) | DB password |
 | `DCRE_EXCHANGE_ROOT` | `../../../../../infra/dcre-infra/exchange` | Exchange root: PSR output tree + outcome seam |
-| `DCRE_PRG_PSR_SLICE_SIZE` | `50000` | Keyset slice size for reads, streaming emission and watermark advances |
-| `DCRE_AMOUNT_SCALE` | `2` | Fleet-wide flag; not read by PRG sources |
-| `DCRE_V1_ENABLED` | `false` | Fleet-wide flag; not read by PRG sources |
-| `DCRE_FLOW_DC` | `true` | Fleet-wide flag; not read by PRG sources |
+| `DCRE_CRG_PSR_SLICE_SIZE` | `50000` | Keyset slice size for reads, streaming emission and watermark advances |
+| `DCRE_AMOUNT_SCALE` | `2` | Fleet-wide flag; not read by CRG sources |
+| `DCRE_V1_ENABLED` | `false` | Fleet-wide flag; not read by CRG sources |
+| `DCRE_FLOW_DC` | `true` | Fleet-wide flag; not read by CRG sources |
 | `JOB_NAME` | `local-<executionId>` | K8s-injected identity for the outcome seam |
 
-Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpath resource (shipped in `platform-batch`, imported via `spring.config.import`); Batch metadata uses table prefix `PRG_BATCH_`; Liquibase history lives in `prg_databasechangelog`(+lock).
+Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpath resource (shipped in `platform-batch`, imported via `spring.config.import`); Batch metadata uses table prefix `CRG_BATCH_`; Liquibase history lives in `prg_databasechangelog`(+lock), retained under the CRG name.
 
 ## Testing
 
@@ -129,7 +180,7 @@ Per-client exchange directories bind from the `dcre-exchange-layout.yml` classpa
 
 Testcontainers CockroachDB `cockroachdb/cockroach:v26.2.3` (Docker required):
 
-- `PrgJobTest`: end-to-end window sequence (first delta with deepest-leg statuses + exactly one R-38 WARN, unchanged window emits the zero-valued heartbeat, single status flip emits exactly that row, resend re-emits all current rows) plus the SCRUM-42 fail-closed unconfigured-client case.
+- `CrgJobTest`: end-to-end window sequence (first delta with deepest-leg statuses + exactly one R-38 WARN, unchanged window emits the zero-valued heartbeat, single status flip emits exactly that row, resend re-emits all current rows) plus the SCRUM-42 fail-closed unconfigured-client case.
 - `PsrReportServiceSliceTest`: bounded-scan proofs (multi-slice delta -> one correct streamed PSR, restart-with-existing-target still advances watermarks, summary WARN above the detail limit).
 - `PsrReportServiceRetryTest`: 40001 retry semantics of the watermark advance.
 - `ReportingSchemaIT` / `ImmediateReportIT`: SCRUM-55 status classes, delivery-ledger guard, batch-scoped `ext_tx_status` v2, due/SLA views; IMMEDIATE/MANUAL report modes with kill-resume proofs.
@@ -140,11 +191,18 @@ Testcontainers CockroachDB `cockroachdb/cockroach:v26.2.3` (Docker required):
 
 ```bash
 ./gradlew bootJar
-docker build -t dcre-prg:TAG .
-kind load docker-image --name dcre-dev dcre-prg:TAG
+docker build -t dcre-crg:TAG .
+kind load docker-image --name dcre-dev dcre-crg:TAG
 ```
 
-The image base is `eclipse-temurin:25-jre-alpine`. In the cluster, AGT's `PrgScheduler` ticks against its clock (`AGT_PRG_INTERVAL_SECONDS`, default 60), derives the window counter from the epoch and launches the image from `AGT_PRG_IMAGE` as an ephemeral K8s Job per (client, window) with parameters `client=<client> window=w<n>` and `JOB_NAME` injected; the JobRepository dedupes on the identifying pair (restart-not-duplicate, R-16). An on-demand run is triggered by dropping a `chaos/run-prg-<client>` file under the exchange root (launches a distinct `-manual` window with `resend=true`). Fleet version switching: `dcre-infra` `scripts/switch-version.sh`; cluster bring-up: `scripts/kind-up.sh` (kind cluster `dcre-dev`); clean slate: `scripts/env-reset.sh`.
+The image base is `eclipse-temurin:25-jre-alpine`. In the cluster, AGT's `CrgScheduler` ticks against its clock (`AGT_CRG_INTERVAL_SECONDS`, default 60), derives the window counter from the epoch and launches the image from `AGT_CRG_IMAGE` as an ephemeral K8s Job per (client, window) with parameters `client=<client> window=w<n>` and `JOB_NAME` injected; the JobRepository dedupes on the identifying pair (restart-not-duplicate, R-16). An on-demand run is triggered by dropping a `chaos/run-crg-<client>` file under the exchange root (launches a distinct `-manual` window with `resend=true`).
+
+The AGT side of that wiring (`Stage.CRG`, `AGT_CRG_IMAGE`, `AGT_CRG_INTERVAL_SECONDS`,
+`CrgScheduler`) is a change to the `agt` repository and is NOT made here: three renames land in AGT
+at once, so they are applied in a single pass by the owner rather than concurrently. Until it
+lands, AGT still launches `dcre-prg:<tag>` under `Stage.PRG`, and `Stage.PRG` is retained
+permanently regardless, because `agt_ops.stage_outcome.stage` is parsed with `Stage.valueOf` and
+deleting a code makes historic rows unreadable (A-75). Fleet version switching: `dcre-infra` `scripts/switch-version.sh`; cluster bring-up: `scripts/kind-up.sh` (kind cluster `dcre-dev`); clean slate: `scripts/env-reset.sh`.
 
 Releases are digits-only 3-component SemVer git tags, uniform across the fleet (current: 2.1.1).
 

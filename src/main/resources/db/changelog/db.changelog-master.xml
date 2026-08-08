@@ -5,11 +5,11 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
-    <include file="db/changelog/2026/07/001-prg.xml"/>
+    <include file="db/changelog/2026/07/001-crg.xml"/>
     <include file="db/changelog/2026/07/002-batch-metadata.xml"/>
     <include file="db/changelog/2026/07/003-reporting.xml"/>
     <include file="db/changelog/2026/07/004-status-classification.xml"/>
-    <include file="db/changelog/2026/07/004-prg-report-jobname.xml"/>
+    <include file="db/changelog/2026/07/004-crg-report-jobname.xml"/>
     <include file="db/changelog/2026/07/005-warehoused-interim.xml"/>
     <include file="db/changelog/2026/07/006-man-collection-outcome.xml"/>
 

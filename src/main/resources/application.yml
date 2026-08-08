@@ -12,9 +12,9 @@ spring:
     username: ${DCRE_DB_USER:root}
     password: ${DCRE_DB_PASSWORD:}
     hikari:
-      # SCRUM-90: prg-ONLY READ COMMITTED (not fleet-wide). prg is the sole service whose
+      # SCRUM-90: crg-ONLY READ COMMITTED (not fleet-wide). crg is the sole service whose
       # concurrent report jobs hit an uncatchable 40001 (RETRY_SERIALIZABLE) at the Batch-6
-      # persistent-JobRepository chunk commit; READ COMMITTED removes it and prg's writes are
+      # persistent-JobRepository chunk commit; READ COMMITTED removes it and crg's writes are
       # full-identity guarded UPSERTs (ON CONFLICT (client,e2e)) so zero-dup is preserved.
       # It is NOT applied fleet-wide because ctv/rpt use cluster_logical_timestamp() /
       # AS OF SYSTEM TIME, which CockroachDB supports only under SERIALIZABLE. Every other
@@ -22,13 +22,27 @@ spring:
       transaction-isolation: TRANSACTION_READ_COMMITTED
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.xml
-    # Shared DB, per-service migration history (same isolation idea as PRG_BATCH_)
+    # Shared DB, per-service migration history (same isolation idea as CRG_BATCH_).
+    #
+    # [!CONVENTION-OVERRIDE] SCRUM-107 renamed this service PRG -> CRG, and the history table was
+    # NOT renamed with it. This deviates from the MAF->MAS / MIS->MIT playbook deliberately.
+    # A history table IS the migration state, so renaming it presents an empty history to a
+    # fully-built dcre_col and replays all 53 changesets. Measured, not assumed
+    # (LegacyUpgradeIT.renamingTheHistoryTableWouldReplayTheChangelogAndFail):
+    #
+    #   Migration failed for changeset 003-reporting.xml::003-drop-ext-tx-status-v1::dcre:
+    #   ERROR: cannot drop relation "ext_tx_status" because view "prg_status_exception" depends on it
+    #
+    # CRG would crash-loop on startup against the live database. The name buys nothing here: the
+    # per-service history table exists to isolate services SHARING a database, these changesets
+    # have exactly one owner either way, and the payments PRG lives in dcre_pay, so its own
+    # prg_databasechangelog can never collide with this one.
     database-change-log-table: prg_databasechangelog
     database-change-log-lock-table: prg_databasechangeloglock
 
 dcre:
   batch:
-    table-prefix: PRG_BATCH_
+    table-prefix: CRG_BATCH_
   agtops-db-url: ${DCRE_AGTOPS_DB_URL:jdbc:postgresql://localhost:26257/agt_ops?sslmode=disable}
   agtops-db-user: ${DCRE_AGTOPS_DB_USER:root}
   agtops-db-password: ${DCRE_AGTOPS_DB_PASSWORD:}
@@ -36,8 +50,8 @@ dcre:
   amount-scale: ${DCRE_AMOUNT_SCALE:2}
   v1-enabled: ${DCRE_V1_ENABLED:false}
   flow-dc: ${DCRE_FLOW_DC:true}
-  prg:
+  crg:
     # SCRUM-42: whole-book reads + a full in-heap render blew CRDB's sql memory
     # budget on the 30M-tx book; PSR reads, streaming emission and watermark
     # advances all run in bounded keyset slices of this size.
-    psr-slice-size: ${DCRE_PRG_PSR_SLICE_SIZE:50000}
+    psr-slice-size: ${DCRE_CRG_PSR_SLICE_SIZE:50000}

@@ -12,15 +12,15 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd"
         logicalFilePath="db/changelog/2026/07/003-reporting.xml">
 
-    <!-- BOOTSTRAP-ORDER GUARD (SCRUM-55, same contract as 001-bootstrap-sources-prg):
-         PRG is clock-launched and may run on a fresh DB before CRW and the readers
+    <!-- BOOTSTRAP-ORDER GUARD (SCRUM-55, same contract as 001-bootstrap-sources-crg):
+         CRG is clock-launched and may run on a fresh DB before CRW and the readers
          ever executed, so every NEW view source is pre-created/patched here with
          MARK_RAN schema-state guards using the owners' EXACT column sets and
          constraint/index names (CRW 001-crw.xml + 003-split.xml, IXR/SXR/PXR
          003-emission-fk). Whichever service runs first wins; the other side's
          guarded changesets MARK_RAN. Per-service liquibase history keeps this safe. -->
 
-    <changeSet id="003-bootstrap-emission-group-prg" author="dcre">
+    <changeSet id="003-bootstrap-emission-group-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><tableExists tableName="crw_emission_group"/></not></preConditions>
         <createTable tableName="crw_emission_group">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()"><constraints primaryKey="true" nullable="false"/></column>
@@ -43,7 +43,7 @@
 
     <!-- Fresh-DB path: the FINAL batch-grain shape (CRW 001 + 003 combined). CRW's own
          guarded changesets converge on this state without re-executing. -->
-    <changeSet id="003-bootstrap-emission-prg" author="dcre">
+    <changeSet id="003-bootstrap-emission-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><tableExists tableName="crw_emission"/></not></preConditions>
         <createTable tableName="crw_emission">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()"><constraints primaryKey="true" nullable="false"/></column>
@@ -67,7 +67,7 @@
         </createIndex>
     </changeSet>
 
-    <changeSet id="003-bootstrap-emission-member-prg" author="dcre">
+    <changeSet id="003-bootstrap-emission-member-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><tableExists tableName="crw_emission_member"/></not></preConditions>
         <createTable tableName="crw_emission_member">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()"><constraints primaryKey="true" nullable="false"/></column>
@@ -85,7 +85,7 @@
 
     <!-- Upgrade path: CRW 001 ran (pre-split table) but CRW 003 has not; the v2 view
          needs the batch columns. Constraint surgery stays owner-managed in CRW 003. -->
-    <changeSet id="003-patch-emission-split-prg" author="dcre">
+    <changeSet id="003-patch-emission-split-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><columnExists tableName="crw_emission" columnName="batch_ordinal"/></not></preConditions>
         <addColumn tableName="crw_emission">
             <column name="group_id" type="UUID"/>
@@ -97,19 +97,19 @@
         </addColumn>
     </changeSet>
 
-    <changeSet id="003-isr-emission-prg" author="dcre">
+    <changeSet id="003-isr-emission-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><columnExists tableName="isr_resp" columnName="emission_id"/></not></preConditions>
         <addColumn tableName="isr_resp"><column name="emission_id" type="UUID"/></addColumn>
         <createIndex tableName="isr_resp" indexName="ix_isr_emission"><column name="emission_id"/></createIndex>
     </changeSet>
 
-    <changeSet id="003-sbsr-emission-prg" author="dcre">
+    <changeSet id="003-sbsr-emission-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><columnExists tableName="sbsr_resp" columnName="emission_id"/></not></preConditions>
         <addColumn tableName="sbsr_resp"><column name="emission_id" type="UUID"/></addColumn>
         <createIndex tableName="sbsr_resp" indexName="ix_sbsr_emission"><column name="emission_id"/></createIndex>
     </changeSet>
 
-    <changeSet id="003-pbsr-emission-prg" author="dcre">
+    <changeSet id="003-pbsr-emission-crg" author="dcre">
         <preConditions onFail="MARK_RAN"><not><columnExists tableName="pbsr_resp" columnName="emission_id"/></not></preConditions>
         <addColumn tableName="pbsr_resp"><column name="emission_id" type="UUID"/></addColumn>
         <createIndex tableName="pbsr_resp" indexName="ix_pbsr_emission"><column name="emission_id"/></createIndex>
@@ -137,7 +137,7 @@
         <!-- ACWC/ACWP deliberately ABSENT: unclassified => interim via LEFT JOIN + COALESCE(false) (A-56). -->
     </changeSet>
 
-    <changeSet id="003-prg-report" author="dcre">
+    <changeSet id="003-crg-report" author="dcre">
         <preConditions onFail="MARK_RAN"><not><tableExists tableName="prg_report"/></not></preConditions>
         <createTable tableName="prg_report">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()"><constraints primaryKey="true" nullable="false"/></column>
@@ -151,7 +151,7 @@
         </createTable>
     </changeSet>
 
-    <changeSet id="003-prg-delivery-ledger" author="dcre">
+    <changeSet id="003-crg-delivery-ledger" author="dcre">
         <preConditions onFail="MARK_RAN"><not><tableExists tableName="prg_delivery_ledger"/></not></preConditions>
         <createTable tableName="prg_delivery_ledger">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()"><constraints primaryKey="true" nullable="false"/></column>
@@ -174,8 +174,8 @@
 
     <!-- ext_tx_status v2: batch-scoped response joins close the A-40 cross-arrival
          e2e cross-link. CRDB CREATE OR REPLACE VIEW cannot reorder/insert columns,
-         so v1 (001's 002-ext-tx-status-prg) is dropped first.
-         Review prg-12 semantics:
+         so v1 (001's 002-ext-tx-status-crg) is dropped first.
+         Review crg-12 semantics:
          (1) Latest-row-per-source: isr/sbsr/pbsr keep one row per (response_file,
              e2e), so a resend or a second response file for the same emission
              stores twins. Per response table only the LATEST row per

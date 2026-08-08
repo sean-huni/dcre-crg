@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- BOOTSTRAP-ORDER GUARD: CRG is clock-launched and may run before CRR/CTV
+         and the ISR/SBSR/PBSR readers ever executed on a fresh DB, so every view
+         source is created here IF NOT EXISTS with the owners' EXACT column sets
+         (CRR 001-spine.xml + 003-layering.xml, CTV 001-ctv.xml + 003-layering.xml,
+         IXR 001-ixr.xml). The owners' own changelogs create the same DDL
+         IF NOT EXISTS; per-service liquibase history tables make this safe. -->
+    <changeSet id="001-bootstrap-sources-crg" author="dcre">
+        <sql>
+            CREATE TABLE IF NOT EXISTS tx_header (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                arrival_id UUID NOT NULL,
+                msg_id_raw VARCHAR(35) NOT NULL,
+                msg_id VARCHAR(35) NOT NULL,
+                created_ts VARCHAR(14) NOT NULL,
+                tx_count INT NOT NULL,
+                initg_pty VARCHAR(35) NOT NULL,
+                business_date VARCHAR(8) NOT NULL,
+                client_token VARCHAR(16),
+                layout_version INT NOT NULL,
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT uq_header_arrival UNIQUE (arrival_id)
+            );
+            CREATE TABLE IF NOT EXISTS tx_entry (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                arrival_id UUID NOT NULL,
+                sequence INT NOT NULL,
+                record_type VARCHAR(2) NOT NULL,
+                e2e_raw VARCHAR(35) NOT NULL,
+                e2e VARCHAR(35) NOT NULL,
+                creditor_account VARCHAR(23) NOT NULL,
+                contract_ref VARCHAR(14),
+                currency VARCHAR(3) NOT NULL,
+                amount_raw VARCHAR(15) NOT NULL,
+                amount DECIMAL(18,2) NOT NULL,
+                branch_code VARCHAR(11),
+                debtor_name VARCHAR(35),
+                debtor_account VARCHAR(23),
+                acc_type_seq VARCHAR(8),
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT uq_entry_arrival_sequence UNIQUE (arrival_id, sequence)
+            );
+            CREATE TABLE IF NOT EXISTS validation_log (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                arrival_id UUID NOT NULL,
+                sequence INT NOT NULL,
+                outcome VARCHAR(32) NOT NULL,
+                detail VARCHAR(256),
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT uq_validation_arrival_sequence UNIQUE (arrival_id, sequence)
+            );
+            CREATE TABLE IF NOT EXISTS isr_resp (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                response_file VARCHAR(128) NOT NULL,
+                orgnl_msg_id VARCHAR(35) NOT NULL,
+                e2e VARCHAR(35) NOT NULL,
+                status VARCHAR(8) NOT NULL,
+                reason VARCHAR(8),
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (response_file, e2e)
+            );
+            CREATE TABLE IF NOT EXISTS sbsr_resp (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                response_file VARCHAR(128) NOT NULL,
+                orgnl_msg_id VARCHAR(35) NOT NULL,
+                e2e VARCHAR(35) NOT NULL,
+                status VARCHAR(8) NOT NULL,
+                reason VARCHAR(8),
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (response_file, e2e)
+            );
+            CREATE TABLE IF NOT EXISTS pbsr_resp (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                response_file VARCHAR(128) NOT NULL,
+                orgnl_msg_id VARCHAR(35) NOT NULL,
+                e2e VARCHAR(35) NOT NULL,
+                status VARCHAR(8) NOT NULL,
+                reason VARCHAR(8),
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (response_file, e2e)
+            );
+        </sql>
+    </changeSet>
+
+    <!-- External status projection. Deepest response leg wins (R-17 stage rank:
+         PBSR 4 > SBSR 3 > ISR 2 > CTV 1); a PASS validation with no response yet
+         projects as CTV_PASS, a FAIL projects its outcome verbatim. -->
+    <changeSet id="002-ext-tx-status-crg" author="dcre">
+        <sql>
+            CREATE VIEW IF NOT EXISTS ext_tx_status AS
+            SELECT t.arrival_id,
+                   t.sequence,
+                   t.e2e,
+                   h.client_token AS client,
+                   COALESCE(p.status, s.status, i.status,
+                            CASE WHEN v.outcome = 'PASS' THEN 'CTV_PASS' ELSE v.outcome END) AS status,
+                   CASE WHEN p.e2e IS NOT NULL THEN 4
+                        WHEN s.e2e IS NOT NULL THEN 3
+                        WHEN i.e2e IS NOT NULL THEN 2
+                        ELSE 1 END AS stage_rank
+            FROM tx_entry t
+            JOIN tx_header h ON h.arrival_id = t.arrival_id
+            LEFT JOIN validation_log v ON v.arrival_id = t.arrival_id AND v.sequence = t.sequence
+            LEFT JOIN isr_resp i ON i.e2e = t.e2e
+            LEFT JOIN sbsr_resp s ON s.e2e = t.e2e
+            LEFT JOIN pbsr_resp p ON p.e2e = t.e2e;
+        </sql>
+    </changeSet>
+
+    <!-- CRG single writer (R-04): per-client delta watermark, keyed (client, e2e). -->
+    <changeSet id="003-crg-watermark-crg" author="dcre">
+        <sql>
+            CREATE TABLE IF NOT EXISTS prg_watermark (
+                id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+                client VARCHAR(16) NOT NULL,
+                e2e VARCHAR(35) NOT NULL,
+                last_status VARCHAR(32) NOT NULL,
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (client, e2e)
+            );
+        </sql>
+    </changeSet>
+
+</databaseChangeLog>

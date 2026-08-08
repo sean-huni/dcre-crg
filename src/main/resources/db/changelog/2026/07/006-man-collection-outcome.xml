@@ -16,13 +16,13 @@
          to the tx_entry spine, so a collection carries its mandate reference on
          its own row. No contract_ref indirection. -->
 
-    <!-- BOOTSTRAP-ORDER GUARD (same contract as 001-bootstrap-sources-prg): PRG is
+    <!-- BOOTSTRAP-ORDER GUARD (same contract as 001-bootstrap-sources-crg): CRG is
          clock-launched and may run on a fresh DB before CRR ever executed, so the
          tx_entry.mandate_ref column is pre-added here with the OWNER's EXACT shape
          (CRR 006-mandate-ref.xml). columnExists MARK_RAN so whichever service runs
          first wins and the other converges; per-service liquibase history keeps
          re-runs safe. Nullable by design: V1/V2 books carry no mandate_ref field. -->
-    <changeSet id="prg-006-tx-entry-mandate-ref" author="dcre">
+    <changeSet id="crg-006-tx-entry-mandate-ref" author="dcre">
         <preConditions onFail="MARK_RAN">
             <not><columnExists tableName="tx_entry" columnName="mandate_ref"/></not>
         </preConditions>
@@ -59,7 +59,7 @@
          col-read role is provisioned in any changelog. If one is later added, a
          role-guarded GRANT mirroring msr-001-man-ctv-view-grant applies (MARK_RAN
          while the role is absent). -->
-    <changeSet id="prg-006-man-collection-outcome-view" author="dcre">
+    <changeSet id="crg-006-man-collection-outcome-view" author="dcre">
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="man_collection_outcome"/></not>
         </preConditions>

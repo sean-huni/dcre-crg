@@ -14,7 +14,7 @@
          latest status is accepted-warehoused has its response and must NOT age
          on the 20h/24h SLA path, so the catalogue gains sla_suppressed and the
          prg_sla_pending view is re-owned with the suppression predicate
-         (later-owner pattern, prg 004 report-due precedent). 004 stays
+         (later-owner pattern, crg 004 report-due precedent). 004 stays
          immutable. -->
 
     <changeSet id="005-sla-suppressed-column" author="dcre">

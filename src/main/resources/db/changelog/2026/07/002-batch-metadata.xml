@@ -5,7 +5,7 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
-    <changeSet id="002-batch-metadata-prg" author="dcre">
+    <changeSet id="002-batch-metadata-crg" author="dcre">
         <!-- A-81: the sqlFile gained IF NOT EXISTS on every CREATE, which CHANGES this
              changeset's checksum and would fail validation on every database that had
              already executed it ("was: 9:6745... but is now: 9:fcef..."), observed live on
@@ -15,7 +15,7 @@
              cannot damage a database in any state. Applying it is what must stay possible;
              the byte-for-byte checksum is not the control that matters for this file. -->
         <validCheckSum>ANY</validCheckSum>
-        <sqlFile path="db/changelog/2026/07/batch-metadata-prg.sql" splitStatements="true"/>
+        <sqlFile path="db/changelog/2026/07/batch-metadata-crg.sql" splitStatements="true"/>
     </changeSet>
 
 </databaseChangeLog>
