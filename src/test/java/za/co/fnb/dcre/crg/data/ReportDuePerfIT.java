@@ -25,7 +25,8 @@ import static org.assertj.core.api.Assertions.tuple;
  * minutes-scale hang, deterministic for CI) while still classifying both
  * seeded parents COMPLETE (all members terminal, nothing ledgered).
  */
-@SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
+@SpringBootTest(properties = {
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml", "spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
         "DCRE_EXCHANGE_ROOT=build/test-exchange"})
 class ReportDuePerfIT {
 

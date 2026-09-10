@@ -154,7 +154,7 @@ public class CrgSteps {
                 "PD|0", "END|0"), Files.readAllLines(psrFile(window)),
                 "an unchanged window emits the zero-valued heartbeat PSR");
         assertEquals("HEARTBEAT", jdbc.queryForObject(
-                "SELECT report_type FROM prg_report WHERE file_name=?", String.class,
+                "SELECT type FROM prg_report WHERE file_name=?", String.class,
                 psrFile(window).getFileName().toString()), "heartbeat registry row");
     }
 

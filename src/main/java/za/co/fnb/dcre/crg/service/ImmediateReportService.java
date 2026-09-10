@@ -201,7 +201,7 @@ public class ImmediateReportService {
             }
             psr.commit();
             log.info("report stage=CRG type={} client={} parent={} window={} lines={} file={}",
-                    report.getReportType(), client, sourceMsgId, report.getWindowKey(),
+                    report.getType(), client, sourceMsgId, report.getWindowKey(),
                     psr.count(), target.getFileName());
         }
     }

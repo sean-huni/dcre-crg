@@ -22,23 +22,10 @@ spring:
       transaction-isolation: TRANSACTION_READ_COMMITTED
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.xml
-    # Shared DB, per-service migration history (same isolation idea as CRG_BATCH_).
-    #
-    # [!CONVENTION-OVERRIDE] SCRUM-107 renamed this service PRG -> CRG, and the history table was
-    # NOT renamed with it. This deviates from the MAF->MAS / MIS->MIT playbook deliberately.
-    # A history table IS the migration state, so renaming it presents an empty history to a
-    # fully-built dcre_col and replays all 53 changesets. Measured, not assumed
-    # (LegacyUpgradeIT.renamingTheHistoryTableWouldReplayTheChangelogAndFail):
-    #
-    #   Migration failed for changeset 003-reporting.xml::003-drop-ext-tx-status-v1::dcre:
-    #   ERROR: cannot drop relation "ext_tx_status" because view "prg_status_exception" depends on it
-    #
-    # CRG would crash-loop on startup against the live database. The name buys nothing here: the
-    # per-service history table exists to isolate services SHARING a database, these changesets
-    # have exactly one owner either way, and the payments PRG lives in dcre_pay, so its own
-    # prg_databasechangelog can never collide with this one.
-    database-change-log-table: prg_databasechangelog
-    database-change-log-lock-table: prg_databasechangeloglock
+    # Shared DB, per-service migration history (same isolation idea as CRG_BATCH_). The history
+    # table names the SERVICE that owns the changelog, so they follow the PRG -> CRG rename.
+    database-change-log-table: crg_databasechangelog
+    database-change-log-lock-table: crg_databasechangeloglock
 
 dcre:
   batch:
@@ -49,7 +36,6 @@ dcre:
   exchange-root: ${DCRE_EXCHANGE_ROOT:../../../../../../infra/dcre-infra/exchange}
   amount-scale: ${DCRE_AMOUNT_SCALE:2}
   v1-enabled: ${DCRE_V1_ENABLED:false}
-  flow-dc: ${DCRE_FLOW_DC:true}
   crg:
     # SCRUM-42: whole-book reads + a full in-heap render blew CRDB's sql memory
     # budget on the 30M-tx book; PSR reads, streaming emission and watermark

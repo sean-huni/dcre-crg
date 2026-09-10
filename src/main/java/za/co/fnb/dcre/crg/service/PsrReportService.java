@@ -152,7 +152,7 @@ public class PsrReportService {
     private boolean heartbeatStands(final Path target) throws IOException {
         final var standing = reports.findByFileName(target.getFileName().toString());
         if (standing.isPresent()) {
-            return "HEARTBEAT".equals(standing.get().getReportType());
+            return "HEARTBEAT".equals(standing.get().getType());
         }
         return Files.exists(target) && "END|0".equals(StreamedPsrWrite.trailer(target));
     }
@@ -183,12 +183,12 @@ public class PsrReportService {
     }
 
     /** SCRUM-55 report registry: find-or-save on the unique file_name so restarts reuse the row. */
-    private UUID openReport(final String client, final String reportType, final String windowKey,
+    private UUID openReport(final String client, final String type, final String windowKey,
                             final Path target, final String jobName) {
         final String fileName = target.getFileName().toString();
         return watermarkTx.execute(s -> reports.findByFileName(fileName)
                 .orElseGet(() -> reports.save(CrgReportEntity.of(
-                        client, reportType, "CLOCK", windowKey, null, fileName, jobName)))
+                        client, type, "CLOCK", windowKey, null, fileName, jobName)))
                 .getId());
     }
 

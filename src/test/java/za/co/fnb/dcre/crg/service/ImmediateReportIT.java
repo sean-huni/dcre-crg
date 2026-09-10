@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * (5) negative: an unknown report.type fails the job; an unknown report.id
  *     rejects the replay;
  * (6) MANUAL regenerate-from-current-status bypasses the auto guard, ledgers
- *     with the manual_ref and stamps report_type MANUAL (keyset-paginated:
+ *     with the manual_ref and stamps type MANUAL (keyset-paginated:
  *     psr-slice-size is 2 here so 3 rows take two slices);
  * (7) the tasklet dispatches report.type=MANUAL + parents + manual.ref;
  * (8)+(9) kill-resume (Task 16 chaos contract): a restart after ledger slices
@@ -47,7 +47,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Clients come from the FNBT isolation pool + FNBCC01 (one per test: ledger
  * tuples and report file names are client-global).
  */
-@SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
+@SpringBootTest(properties = {
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml", "spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
         "DCRE_EXCHANGE_ROOT=build/test-exchange", "dcre.crg.psr-slice-size=2"})
 class ImmediateReportIT {
 
@@ -254,7 +255,7 @@ class ImmediateReportIT {
         assertThat(Files.readAllLines(replayed)).isEqualTo(Files.readAllLines(first.get()));
         assertThat(manualLedgerCount(client)).isEqualTo(2); // bypasses the guard, still audited
         assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_report WHERE client = ?"
-                + " AND report_type = 'MANUAL'", Long.class, client)).isEqualTo(1L);
+                + " AND type = 'MANUAL'", Long.class, client)).isEqualTo(1L);
         // replay renders history; it must never touch (or regress) the watermark
         assertThat(jdbc.queryForObject("SELECT last_status FROM prg_watermark WHERE client = ?"
                 + " AND e2e = 'E2EIMR2'", String.class, client)).isEqualTo("ACSP");
@@ -313,7 +314,7 @@ class ImmediateReportIT {
         assertThat(Files.readAllLines(manual.get())).containsExactly(
                 "PSR|" + client + "|man-2", "TX|E2EMAN1|ACSC", "TX|E2EMAN2|RJCT",
                 "TX|E2EMAN3|ACSC", "END|3");
-        assertThat(jdbc.queryForObject("SELECT report_type FROM prg_report WHERE file_name = ?",
+        assertThat(jdbc.queryForObject("SELECT type FROM prg_report WHERE file_name = ?",
                 String.class, client + "_PSR_man-2.txt")).isEqualTo("MANUAL");
         assertThat(jdbc.query("SELECT e2e, manual_ref FROM prg_delivery_ledger WHERE client = ?"
                         + " AND manual_ref IS NOT NULL ORDER BY e2e",
@@ -343,7 +344,7 @@ class ImmediateReportIT {
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
         assertThat(Files.readAllLines(out(client, client + "_PSR_manjob1.txt"))).containsExactly(
                 "PSR|" + client + "|manjob1", "TX|E2EMJ1|ACSC", "END|1");
-        assertThat(jdbc.queryForObject("SELECT report_type FROM prg_report WHERE file_name = ?",
+        assertThat(jdbc.queryForObject("SELECT type FROM prg_report WHERE file_name = ?",
                 String.class, client + "_PSR_manjob1.txt")).isEqualTo("MANUAL");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM prg_delivery_ledger WHERE client = ?"
                 + " AND manual_ref = 'OPS-9'", Long.class, client)).isEqualTo(1L);
@@ -366,7 +367,7 @@ class ImmediateReportIT {
         // post-SIGKILL state: report row + slice-1 ledger row committed (REQUIRES_NEW slices
         // land before the file's ATOMIC_MOVE), file absent, slice-2 row still unledgered
         UUID reportId = UUID.randomUUID();
-        jdbc.update("INSERT INTO prg_report (id, client, report_type, trigger_kind, window_key,"
+        jdbc.update("INSERT INTO prg_report (id, client, type, trigger_kind, window_key,"
                         + " parent_source_msg_id, file_name) VALUES (?,?,?,?,?,?,?)",
                 reportId, client, "IMMEDIATE", "COMPLETE", "immcr-1", "MSGCR",
                 client + "_PSR_immcr-1.txt");
@@ -398,7 +399,7 @@ class ImmediateReportIT {
         member(b, 1, "E2ECA1");
         resp("pbsr_resp", b, "E2ECA1", "ACSC");
         UUID reportId = UUID.randomUUID();
-        jdbc.update("INSERT INTO prg_report (id, client, report_type, trigger_kind, window_key,"
+        jdbc.update("INSERT INTO prg_report (id, client, type, trigger_kind, window_key,"
                         + " parent_source_msg_id, file_name) VALUES (?,?,?,?,?,?,?)",
                 reportId, client, "IMMEDIATE", "COMPLETE", "immca-1", "MSGCA",
                 client + "_PSR_immca-1.txt");

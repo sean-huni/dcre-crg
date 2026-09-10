@@ -5,12 +5,10 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
-    <include file="db/changelog/2026/07/001-crg.xml"/>
-    <include file="db/changelog/2026/07/002-batch-metadata.xml"/>
-    <include file="db/changelog/2026/07/003-reporting.xml"/>
-    <include file="db/changelog/2026/07/004-status-classification.xml"/>
-    <include file="db/changelog/2026/07/004-crg-report-jobname.xml"/>
-    <include file="db/changelog/2026/07/005-warehoused-interim.xml"/>
-    <include file="db/changelog/2026/07/006-man-collection-outcome.xml"/>
+    <!-- CRG schema, VERSION 1. The pre-v1 changelogs under 2026/07 are gone, not
+         superseded: every DCRE database is dropped and recreated at the v1 cutover,
+         so there is no history for them to be consistent with. -->
+
+    <include file="db/changelog/2026/08/db.changelog-2026-08.xml"/>
 
 </databaseChangeLog>

@@ -10,7 +10,7 @@ import java.util.UUID;
 
 /**
  * SCRUM-55 report registry: one row per emitted report artifact
- * (report_type SCHEDULED | IMMEDIATE | HEARTBEAT | MANUAL). Plain aggregate,
+ * (type SCHEDULED | IMMEDIATE | HEARTBEAT | MANUAL). Plain aggregate,
  * NOT a BaseEntity: prg_report is append-only (no version/updated_at
  * columns), so new-ness rides {@link Persistable} instead of the @Version
  * heuristic and the factory assigns id + created_at client-side.
@@ -21,7 +21,7 @@ public class CrgReportEntity implements Persistable<UUID> {
     @Id
     private UUID id;
     private String client;
-    private String reportType;
+    private String type;
     private String triggerKind;
     private String windowKey;
     private String parentSourceMsgId;
@@ -33,10 +33,10 @@ public class CrgReportEntity implements Persistable<UUID> {
     private boolean isNew;
 
     /** Job-less convenience (direct-service callers/tests): no batch execution, so job_name stays null. */
-    public static CrgReportEntity of(final String client, final String reportType,
+    public static CrgReportEntity of(final String client, final String type,
             final String triggerKind, final String windowKey, final String parentSourceMsgId,
             final String fileName) {
-        return of(client, reportType, triggerKind, windowKey, parentSourceMsgId, fileName, null);
+        return of(client, type, triggerKind, windowKey, parentSourceMsgId, fileName, null);
     }
 
     /**
@@ -45,14 +45,14 @@ public class CrgReportEntity implements Persistable<UUID> {
      * tasklet); persisted in the SAME transaction as the report row so a
      * supporter can join a PSR file to its launching job's ops steps.
      */
-    public static CrgReportEntity of(final String client, final String reportType,
+    public static CrgReportEntity of(final String client, final String type,
             final String triggerKind, final String windowKey, final String parentSourceMsgId,
             final String fileName, final String jobName) {
         CrgReportEntity r = new CrgReportEntity();
         r.id = UUID.randomUUID();
         r.isNew = true;
         r.client = client;
-        r.reportType = reportType;
+        r.type = type;
         r.triggerKind = triggerKind;
         r.windowKey = windowKey;
         r.parentSourceMsgId = parentSourceMsgId;
@@ -69,7 +69,7 @@ public class CrgReportEntity implements Persistable<UUID> {
     public boolean isNew() { return isNew; }
 
     public String getClient() { return client; }
-    public String getReportType() { return reportType; }
+    public String getType() { return type; }
     public String getTriggerKind() { return triggerKind; }
     public String getWindowKey() { return windowKey; }
     public String getParentSourceMsgId() { return parentSourceMsgId; }

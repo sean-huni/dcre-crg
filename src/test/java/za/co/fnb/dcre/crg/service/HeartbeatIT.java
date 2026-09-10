@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (2) PD counts the client's prg_sla_pending rows (VISIBLE batch members
  *     with a non-terminal status); an all-quiet book prints PD|0;
  * (3) a window WITH delta emits the normal file (TX lines, no HB/PD) with
- *     report_type SCHEDULED: the heartbeat never replaces a real report;
+ *     type SCHEDULED: the heartbeat never replaces a real report;
  * (4) kill-resume (review blocker crg-11): a same-window replay that finds a
  *     standing heartbeat but a late delta defers the delta to the next
  *     window; it never ledgers/advances against the zero-TX file, with the
@@ -37,7 +37,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Clients come from the FNBT isolation pool + FNBCC01 (one per test: report
  * file names and watermark rows are client-global).
  */
-@SpringBootTest(properties = {"spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
+@SpringBootTest(properties = {
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml", "spring.batch.job.enabled=false", "dcre.exchange-root=build/test-exchange",
         "DCRE_EXCHANGE_ROOT=build/test-exchange"})
 class HeartbeatIT {
 
@@ -124,7 +125,7 @@ class HeartbeatIT {
     }
 
     String reportType(String fileName) {
-        return jdbc.queryForObject("SELECT report_type FROM prg_report WHERE file_name = ?",
+        return jdbc.queryForObject("SELECT type FROM prg_report WHERE file_name = ?",
                 String.class, fileName);
     }
 
