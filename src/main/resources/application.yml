@@ -28,6 +28,18 @@ spring:
     database-change-log-lock-table: crg_databasechangeloglock
 
 dcre:
+  # Telemetry marker, read by platform-batch. Everything else about telemetry (the service name,
+  # the instance id, the export flag, the flush, the log appender and the trace context) is
+  # resolved inside the library, so this file carries no telemetry configuration of its own and
+  # cannot drift from its 29 siblings.
+  #
+  # Disabled by default: a service run outside the orchestrator behaves exactly as before, and a
+  # fresh clone runs with no .env at all (12FactorApp Alignment, https://12factor.net/).
+  telemetry:
+    enabled: ${DCRE_TELEMETRY_ENABLED:false}
+    # OPTIONAL override. Left unset, the library takes this service's own application package
+    # leaf, so no service restates its own name here.
+    stage: ${DCRE_TELEMETRY_STAGE:}
   batch:
     table-prefix: CRG_BATCH_
   agtops-db-url: ${DCRE_AGTOPS_DB_URL:jdbc:postgresql://localhost:26257/agt_ops?sslmode=disable}
