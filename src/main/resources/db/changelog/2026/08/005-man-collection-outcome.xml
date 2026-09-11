@@ -83,6 +83,10 @@
          Rows with NULL mandate_ref (non-mandate collections, and every legacy V1/V2
          book, A-72) are excluded. -->
     <changeSet id="crg-v1-man-collection-outcome-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="man_collection_outcome"/></not>
+        </preConditions>
+        
         <createView viewName="man_collection_outcome"><![CDATA[
             SELECT t.mandate_ref,
                    x.e2e,

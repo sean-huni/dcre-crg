@@ -45,6 +45,10 @@
          ============================================================================ -->
 
     <changeSet id="crg-v1-status-class" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="prg_status_class"/></not>
+        </preConditions>
+        
         <createTable tableName="prg_status_class">
             <column name="code" type="VARCHAR(8)">
                 <constraints primaryKey="true" nullable="false"/>
@@ -60,6 +64,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-status-catalogue" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT count(*) FROM prg_status_class</sqlCheck>
+        </preConditions>
+        
         <insert tableName="prg_status_class">
             <column name="code" value="ACSC"/><column name="terminal" valueBoolean="true"/>
             <column name="classification" value="TERMINAL_SUCCESS"/>

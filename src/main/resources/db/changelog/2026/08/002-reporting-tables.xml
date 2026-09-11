@@ -59,6 +59,10 @@
          key IS the full business identity, so a restarted advance rewrites its own
          row rather than duplicating it. -->
     <changeSet id="crg-v1-watermark" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="prg_watermark"/></not>
+        </preConditions>
+        
         <createTable tableName="prg_watermark">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
                 <constraints primaryKey="true" nullable="false"/>
@@ -87,6 +91,10 @@
          job_name is the clock-scoped trace anchor rpt v_flow_trace joins against
          agt_ops.launch_intent.job_name; VARCHAR(63) matches that seam contract. -->
     <changeSet id="crg-v1-report" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="prg_report"/></not>
+        </preConditions>
+        
         <createTable tableName="prg_report">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
                 <constraints primaryKey="true" nullable="false"/>
@@ -116,6 +124,10 @@
          uq_ledger_auto is the auto-send guard and excludes manual rows, so a manual
          override bypasses the guard while still being ledgered for audit. -->
     <changeSet id="crg-v1-delivery-ledger" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="prg_delivery_ledger"/></not>
+        </preConditions>
+        
         <createTable tableName="prg_delivery_ledger">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
                 <constraints primaryKey="true" nullable="false"/>
@@ -138,6 +150,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ledger-auto-guard" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="prg_delivery_ledger" indexName="uq_ledger_auto"/></not>
+        </preConditions>
+        
         <!-- LIQUIBASE-SQL-EXCEPTION: a PARTIAL unique index (WHERE predicate) has no
              typed Liquibase tag. The predicate is the point of the index: manual
              overrides must bypass the auto-send guard. -->
@@ -159,6 +175,10 @@
          lookups and hung a live trigger scan for over seven minutes on a 12,001-tx
          parent. Named ix_prg_* so their owner is unambiguous on a shared database. -->
     <changeSet id="crg-v1-ix-isr-emission-e2e-created" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created"/></not>
+        </preConditions>
+        
         <createIndex tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created">
             <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
         </createIndex>
@@ -168,6 +188,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-sbsr-emission-e2e-created" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created"/></not>
+        </preConditions>
+        
         <createIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created">
             <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
         </createIndex>
@@ -177,6 +201,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-pbsr-emission-e2e-created" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created"/></not>
+        </preConditions>
+        
         <createIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created">
             <column name="emission_id"/><column name="e2e"/><column name="created_at"/>
         </createIndex>
@@ -186,6 +214,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-isr-orgnl-e2e" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e"/></not>
+        </preConditions>
+        
         <createIndex tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e">
             <column name="orgnl_msg_id"/><column name="e2e"/>
         </createIndex>
@@ -195,6 +227,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-sbsr-orgnl-e2e" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e"/></not>
+        </preConditions>
+        
         <createIndex tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e">
             <column name="orgnl_msg_id"/><column name="e2e"/>
         </createIndex>
@@ -204,6 +240,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-pbsr-orgnl-e2e" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e"/></not>
+        </preConditions>
+        
         <createIndex tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e">
             <column name="orgnl_msg_id"/><column name="e2e"/>
         </createIndex>
@@ -213,6 +253,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-emission-group" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><indexExists tableName="crw_emission" indexName="ix_prg_emission_group"/></not>
+        </preConditions>
+        
         <createIndex tableName="crw_emission" indexName="ix_prg_emission_group">
             <column name="group_id"/>
         </createIndex>

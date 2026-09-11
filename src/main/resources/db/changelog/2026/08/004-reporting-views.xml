@@ -61,6 +61,10 @@
          bearing: the correlated per-row form it replaced executed as nested-loop
          lookups and hung a live trigger scan for over seven minutes. -->
     <changeSet id="crg-v1-isr-pick-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_isr_pick"/></not>
+        </preConditions>
+        
         <createView viewName="prg_isr_pick"><![CDATA[
             SELECT u.emission_id, u.e2e, u.status
             FROM (SELECT c.emission_id, c.e2e, c.status,
@@ -84,6 +88,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-sbsr-pick-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_sbsr_pick"/></not>
+        </preConditions>
+        
         <createView viewName="prg_sbsr_pick"><![CDATA[
             SELECT u.emission_id, u.e2e, u.status
             FROM (SELECT c.emission_id, c.e2e, c.status,
@@ -107,6 +115,10 @@
     </changeSet>
 
     <changeSet id="crg-v1-pbsr-pick-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_pbsr_pick"/></not>
+        </preConditions>
+        
         <createView viewName="prg_pbsr_pick"><![CDATA[
             SELECT u.emission_id, u.e2e, u.status
             FROM (SELECT c.emission_id, c.e2e, c.status,
@@ -138,6 +150,10 @@
          emission AT ALL, matched inside the parent identity family (the parent MsgId
          or a split child MsgId_N) with its own per-(family, e2e) latest-row pick. -->
     <changeSet id="crg-v1-ext-tx-status-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="ext_tx_status"/></not>
+        </preConditions>
+        
         <createView viewName="ext_tx_status"><![CDATA[
             WITH member_emission AS (
                     SELECT m.sequence, e.arrival_id, e.id AS emission_id, e.group_id,
@@ -216,6 +232,10 @@
          The no-emission family fallback is irrelevant here by construction: a member
          row proves the emission exists. -->
     <changeSet id="crg-v1-member-status-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_member_status"/></not>
+        </preConditions>
+        
         <createView viewName="prg_member_status"><![CDATA[
             SELECT em.group_id, g.client, g.source_msg_id, m.emission_id, t.e2e,
                    COALESCE(pp.status, sp.status, ip.status,
@@ -251,6 +271,10 @@
          per-parent correlated scan of the ext_tx_status stack here: that exact shape
          hung the live trigger scan for over seven minutes on a 12,001-tx parent. -->
     <changeSet id="crg-v1-report-due-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_report_due"/></not>
+        </preConditions>
+        
         <createView viewName="prg_report_due"><![CDATA[
             WITH member_state AS (
                     SELECT ms.group_id,
@@ -296,6 +320,10 @@
          had its response (accepted warehoused interim), so it must not age here even
          though it is non-terminal. -->
     <changeSet id="crg-v1-sla-pending-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_sla_pending"/></not>
+        </preConditions>
+        
         <createView viewName="prg_sla_pending"><![CDATA[
             SELECT ms.client, ms.e2e, em.outbound_msg_id, em.visible_at,
                    EXTRACT(EPOCH FROM (now() - em.visible_at)) / 3600 AS age_hours
@@ -316,6 +344,10 @@
          single projection authority; an unclassified code COALESCEs to UNKNOWN rather
          than disappearing. -->
     <changeSet id="crg-v1-status-exception-view" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><viewExists viewName="prg_status_exception"/></not>
+        </preConditions>
+        
         <createView viewName="prg_status_exception"><![CDATA[
             SELECT x.client::VARCHAR(16) AS client,
                    COALESCE(x.source_msg_id, h.msg_id)::VARCHAR(35) AS source_msg_id,
