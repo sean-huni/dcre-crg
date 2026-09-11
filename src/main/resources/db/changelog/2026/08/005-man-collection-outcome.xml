@@ -83,6 +83,14 @@
          Rows with NULL mandate_ref (non-mandate collections, and every legacy V1/V2
          book, A-72) are excluded. -->
     <changeSet id="crg-v1-man-collection-outcome-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:e945a185de278a3573eda4ba9589d3f6,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="man_collection_outcome"/></not>
         </preConditions>

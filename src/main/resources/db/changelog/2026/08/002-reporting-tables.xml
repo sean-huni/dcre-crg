@@ -59,6 +59,14 @@
          key IS the full business identity, so a restarted advance rewrites its own
          row rather than duplicating it. -->
     <changeSet id="crg-v1-watermark" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:ef291d3f43174d19b183f2a4d49615a4,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><tableExists tableName="prg_watermark"/></not>
         </preConditions>
@@ -91,6 +99,14 @@
          job_name is the clock-scoped trace anchor rpt v_flow_trace joins against
          agt_ops.launch_intent.job_name; VARCHAR(63) matches that seam contract. -->
     <changeSet id="crg-v1-report" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:186f4a5b1774fd10e50ca07a0e43c28b,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><tableExists tableName="prg_report"/></not>
         </preConditions>
@@ -124,6 +140,14 @@
          uq_ledger_auto is the auto-send guard and excludes manual rows, so a manual
          override bypasses the guard while still being ledgered for audit. -->
     <changeSet id="crg-v1-delivery-ledger" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:0be717fbc049d3861202e25992601839,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><tableExists tableName="prg_delivery_ledger"/></not>
         </preConditions>
@@ -150,6 +174,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ledger-auto-guard" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:938c46b0c9c9e1e28b34caee29180be2,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="prg_delivery_ledger" indexName="uq_ledger_auto"/></not>
         </preConditions>
@@ -175,6 +207,14 @@
          lookups and hung a live trigger scan for over seven minutes on a 12,001-tx
          parent. Named ix_prg_* so their owner is unambiguous on a shared database. -->
     <changeSet id="crg-v1-ix-isr-emission-e2e-created" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:cec6ddbd9f1bb9b357eea58fb5bceef3,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="isr_resp" indexName="ix_prg_isr_emission_e2e_created"/></not>
         </preConditions>
@@ -188,6 +228,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-sbsr-emission-e2e-created" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:50c56534e6cd05cffcf4be6fbd5f6266,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="sbsr_resp" indexName="ix_prg_sbsr_emission_e2e_created"/></not>
         </preConditions>
@@ -201,6 +249,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-pbsr-emission-e2e-created" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:39525cd4d349d530d2593b34087f5f0b,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="pbsr_resp" indexName="ix_prg_pbsr_emission_e2e_created"/></not>
         </preConditions>
@@ -214,6 +270,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-isr-orgnl-e2e" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:efb56fe20173b6ca0109521626bd45d2,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="isr_resp" indexName="ix_prg_isr_orgnl_e2e"/></not>
         </preConditions>
@@ -227,6 +291,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-sbsr-orgnl-e2e" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:5fbe4aa609f6759bb9898c7b67c83cce,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="sbsr_resp" indexName="ix_prg_sbsr_orgnl_e2e"/></not>
         </preConditions>
@@ -240,6 +312,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-pbsr-orgnl-e2e" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:821715a3595bf1974232c8c3b229b2cd,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="pbsr_resp" indexName="ix_prg_pbsr_orgnl_e2e"/></not>
         </preConditions>
@@ -253,6 +333,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-ix-emission-group" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:1e2432e4f781a4bbcb8bbec8d6c55e7e,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><indexExists tableName="crw_emission" indexName="ix_prg_emission_group"/></not>
         </preConditions>

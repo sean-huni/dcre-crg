@@ -61,6 +61,14 @@
          bearing: the correlated per-row form it replaced executed as nested-loop
          lookups and hung a live trigger scan for over seven minutes. -->
     <changeSet id="crg-v1-isr-pick-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:07916a272ccbe5f7b02c9c9051fa46a7,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_isr_pick"/></not>
         </preConditions>
@@ -88,6 +96,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-sbsr-pick-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:b578c0ba5ee50901e03bab17f17e6d11,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_sbsr_pick"/></not>
         </preConditions>
@@ -115,6 +131,14 @@
     </changeSet>
 
     <changeSet id="crg-v1-pbsr-pick-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:a31509ab88e11a997aa85b18f6a844a4,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_pbsr_pick"/></not>
         </preConditions>
@@ -150,6 +174,14 @@
          emission AT ALL, matched inside the parent identity family (the parent MsgId
          or a split child MsgId_N) with its own per-(family, e2e) latest-row pick. -->
     <changeSet id="crg-v1-ext-tx-status-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:6af8241d7cbab9138bf7ce64bfd7dfd8,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="ext_tx_status"/></not>
         </preConditions>
@@ -232,6 +264,14 @@
          The no-emission family fallback is irrelevant here by construction: a member
          row proves the emission exists. -->
     <changeSet id="crg-v1-member-status-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:48130f0c58fb30b647c172d6d451384c,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_member_status"/></not>
         </preConditions>
@@ -271,6 +311,14 @@
          per-parent correlated scan of the ext_tx_status stack here: that exact shape
          hung the live trigger scan for over seven minutes on a 12,001-tx parent. -->
     <changeSet id="crg-v1-report-due-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:4b28438483d6ac92736754bda010f3aa,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_report_due"/></not>
         </preConditions>
@@ -320,6 +368,14 @@
          had its response (accepted warehoused interim), so it must not age here even
          though it is non-terminal. -->
     <changeSet id="crg-v1-sla-pending-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:9cace9b8df91a41f68698b8f8c059b46,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_sla_pending"/></not>
         </preConditions>
@@ -344,6 +400,14 @@
          single projection authority; an unclassified code COALESCEs to UNKNOWN rather
          than disappearing. -->
     <changeSet id="crg-v1-status-exception-view" author="dcre">
+        <!-- A-82: this changeset gained a re-run guard AFTER it had already been applied,
+             which changes the enclosing checksum without changing one byte of the DDL
+             below. ANY rather than a pinned value: kind-dcre-dev stored 9:ab7115bf20b31eb6878f9dde68413ece,
+             and every environment that migrated at a different time holds a different
+             one, so a pin is correct on exactly one database and silently wrong on the
+             rest. The preConditions block is what keeps the re-run safe; the checksum
+             is not load-bearing here. Same call, same reason, as prr 002-batch-metadata. -->
+        <validCheckSum>ANY</validCheckSum>
         <preConditions onFail="MARK_RAN">
             <not><viewExists viewName="prg_status_exception"/></not>
         </preConditions>
