@@ -101,7 +101,7 @@ Liquibase with per-service history tables (`crg_databasechangelog` / `crg_databa
 on the shared `dcre_col` database. The changelog is a VERSION 1 BASELINE: the pre-v1 changelogs
 under `2026/07` are gone rather than superseded, because the database is dropped and recreated at
 the cutover, so there is no history for them to be consistent with. The root master includes the
-MONTH sub-master, never individual changesets.
+MONTH sub-masters, never individual changesets.
 
 1. `2026/08/001-batch-metadata.xml`: Spring Batch 6.0.4 job-repository metadata under prefix
    `CRG_BATCH_`, pure typed tags (no external SQL file, so no ANY-checksum override).
@@ -112,6 +112,17 @@ MONTH sub-master, never individual changesets.
    stated once in their settled form.
 4. `2026/08/004-reporting-views.xml`: the pick views, `ext_tx_status`, `prg_member_status`,
    `prg_report_due`, `prg_sla_pending` and `prg_status_exception`, each defined exactly once.
+5. `2026/08/005-man-collection-outcome.xml`: `man_collection_outcome`, the one relation in
+   this schema a service outside collections reads. It carries a `[!CONVENTION-OVERRIDE]`
+   against database-per-service, with its retirement condition, in the file itself.
+6. `2026/09/001-report-type-rename.xml`: renames `prg_report.report_type` to
+   `prg_report.type` on a database that still carries the pre-rename spelling, and is a
+   `MARK_RAN` no-op on a fresh one. It exists because the `MARK_RAN` `tableExists` guard on
+   `crg-v1-report` asks whether the table NAME is taken and cannot ask whether its SHAPE
+   matches: on kind-dcre-dev the `createTable` was recorded as applied against the older
+   shape, the migration exited green, and CRG then died on
+   `column "prg_report.type" does not exist`. A guard over a changed shape turns a loud
+   failure into a silent wrong schema, and the history row makes it permanent.
 
 **CRG no longer creates its read sources, and that is an ordering contract.** The pre-v1 changelog
 bootstrap-minted nine relations CRG does not own, so a clock-launched window could run before the

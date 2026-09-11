@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         REPAIR of a LIVE schema drift, measured on kind-dcre-dev 2026-09-11.
+
+         CRG died at startup on a column this changelog says it creates:
+
+           Caused by: org.postgresql.util.PSQLException:
+             ERROR: column "prg_report.type" does not exist
+
+         The changelog is right and the database is stale. 2026/08/002-reporting-tables.xml
+         declares the column as `type`, CrgReportEntity maps `type`, and the test suite
+         expects `type`. The live table carries `report_type`. Measured live column list:
+
+           dcre_col.prg_report:
+             id, client, report_type, trigger_kind, window_key, parent_source_msg_id,
+             file_name, created_at, job_name
+
+         WHY THE MIGRATION REPORTED SUCCESS WHILE THE SCHEMA WAS WRONG. The
+         crg-v1-report changeset gained a re-run guard,
+         onFail="MARK_RAN" over not/tableExists prg_report, after that table already
+         stood in its PRE-RENAME shape. A tableExists guard asks whether the NAME is
+         taken; it cannot ask whether the SHAPE matches. So on a database holding the
+         old table the createTable was recorded as applied WITHOUT running: a loud
+         "relation already exists" became a silent wrong schema. Liquibase exited
+         green, the history row now claims the create ran, and nothing will ever
+         revisit it. That is what makes the drift permanent rather than transient, and
+         it is why the repair has to be a separate changeset rather than an edit to
+         the create.
+
+         The changeset below converges the two reachable states and is the only thing
+         that distinguishes them:
+
+           stale database: report_type is present, the precondition PASSES, the
+                           rename RUNS, and the column becomes type.
+           fresh database: the column was created as type, the precondition FAILS,
+                           and MARK_RAN records the changeset as applied without
+                           running it.
+
+         Verified on this cluster: CockroachDB accepts
+         ALTER TABLE x RENAME COLUMN a TO b.
+
+         prg_report keeps its prg_ prefix. That naming defect is recorded in
+         2026/08/002-reporting-tables.xml and is owned by the rpt owner, not here.
+         ============================================================================ -->
+
+    <changeSet id="crg-v2-report-type-rename" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <columnExists tableName="prg_report" columnName="report_type"/>
+        </preConditions>
+        <renameColumn tableName="prg_report" oldColumnName="report_type" newColumnName="type"/>
+        <rollback>
+            <renameColumn tableName="prg_report" oldColumnName="type" newColumnName="report_type"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

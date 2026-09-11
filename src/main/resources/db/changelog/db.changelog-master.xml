@@ -10,5 +10,8 @@
          so there is no history for them to be consistent with. -->
 
     <include file="db/changelog/2026/08/db.changelog-2026-08.xml"/>
+    <!-- 2026/09 is LAST and must stay last: it repairs shapes that 2026/08 created,
+         so every changeset in it resolves a table an earlier month already minted. -->
+    <include file="db/changelog/2026/09/db.changelog-2026-09.xml"/>
 
 </databaseChangeLog>

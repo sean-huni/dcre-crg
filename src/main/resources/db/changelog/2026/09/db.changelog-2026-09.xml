@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- Sub-master for 2026/09, the first month after the v1 baseline. The root
+         master includes MONTHS and never individual changesets, so this file is what
+         the root gains and every changeset within the month stays ordered here.
+
+         The month carries repairs to databases that the v1 baseline could not reach,
+         so every changeset in it is guarded on the STALE shape and is a MARK_RAN
+         no-op on a fresh database. -->
+
+    <include file="db/changelog/2026/09/001-report-type-rename.xml"/>
+
+</databaseChangeLog>
