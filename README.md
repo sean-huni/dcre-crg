@@ -132,7 +132,7 @@ MONTH sub-master, never individual changesets.
    read indexes.
 3. `2026/08/003-status-classification.xml`: `prg_status_class` and all fourteen recognised codes,
    stated once in their settled form.
-4. `2026/08/004-reporting-views.xml`: the pick views, `ext_tx_status`, `prg_member_status`,
+4. `2026/08/004-reporting-views.xml`: the pick views `prg_isr_pick`, `prg_sbsr_pick` and `prg_pbsr_pick`, `ext_tx_status`, `prg_member_status`,
    `prg_report_due`, `prg_sla_pending` and `prg_status_exception`, each defined exactly once.
 5. `2026/08/005-man-collection-outcome.xml`: `man_collection_outcome` (A-70, M10), terminal-failure/success/pending per mandate, for MRG's suspension sweep.
 
@@ -244,7 +244,7 @@ In the cluster, AGT (origin/dev, checked 2026-09-28) launches CRG into the colle
 - `ReportTrigger`: one IMMEDIATE run per due parent in `prg_report_due`, `client`, a digest `window` stable per (client, parent), `report.type=IMMEDIATE`, `parents=<sourceMsgId>`.
 - On demand: dropping `<exchange-root>/chaos/run-crg-<client>` launches a distinct `-manual` window with `resend=true`.
 
-Cluster bring-up: dcre-infra `scripts/kind-up.sh` (kind cluster `dcre-dev`); clean slate: `scripts/env-reset.sh`. Releases are digits-only 3-component SemVer git tags, uniform across the fleet.
+Cluster bring-up: dcre-infra `scripts/kind-up.sh` (kind cluster `dcre-dev`); clean slate: `scripts/env-reset.sh`. Release tags are digits-only 3-component SemVer; this repo carries 1.0.0 through 2.2.1, and tagging is not uniform across the fleet (the payments stages carry none; `git ls-remote --tags`, checked 2026-09-28).
 
 ## Related repositories
 
